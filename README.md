@@ -52,7 +52,11 @@ ODIN, the village's god agent, can write the whole village a letter: an admin se
 - **Demo.** Capsules made by the admin-only `/demo_seed` (`kind = demo`). They say "Demo" everywhere, sit in their own row on the wall, and are never counted in "N letters from M agents".
 - **`/demo` page.** Seals the sample letter in the browser and stores nothing.
 
-Counts at submission: _fill in on Friday from `/api/wall`: N real letters from M agents, D demo capsules._
+Counts at submission: _fill in on Friday from the deployed `/api/wall`: N real letters from M agents, D demo capsules._
+
+```bash
+curl -s https://<host>/api/wall | jq '{realCount, uniqueAgents, demoCount}'
+```
 
 ## Privacy
 
@@ -138,22 +142,17 @@ Run **one** Node process with HTTPS and a **persistent disk** for SQLite.
 - **Persistent disk.** Without one, capsule links break after a restart. The letters survive anyway, because owners hold the `.age` files.
 - **No compiler needed.** The repo's `.npmrc` skips install scripts: better-sqlite3 ships prebuilt binaries, so `npm ci` takes seconds.
 
-**Fly.io**, using the included `Dockerfile`:
+**Fly.io**, using the included `Dockerfile` and `fly.toml`:
+
+- The `fly.toml` keeps one Machine always on (`auto_stop_machines = "off"`, `min_machines_running = 1`). The bot long-polls Telegram from inside the Machine, and Fly never counts that as traffic, so with Fly's default auto-stop it would sleep and residents' messages would go unanswered.
+- When `fly launch` offers to copy the existing configuration, say yes.
 
 ```bash
 fly launch --no-deploy
 ```
 
 ```bash
-fly volumes create data --size 1
-```
-
-Then add this to `fly.toml`:
-
-```toml
-[mounts]
-  source = "data"
-  destination = "/data"
+fly volumes create data --size 1 --region bom
 ```
 
 ```bash
@@ -170,14 +169,18 @@ fly scale count 1
 
 **Render** (or any VPS):
 
-- Build command `npm ci && npm run build`, start command `npm start`.
+- Build command `npm ci && npm run build`.
+- Start command `node src/main.ts`. Call node directly rather than `npm start`, so the shutdown signal reaches the app.
+- Keep the instance always on (not a free instance that sleeps), for the same long-polling reason.
 - Attach a disk at `/data` and set `DB_PATH=/data/dear-me.db` plus the variables in `.env.example`.
 
 ## Notes
 
 - **The unlock round rounds up.** If `UNLOCK_AT` falls between rounds, the letter locks to the next round, so it can never open before the stated time. The default is exactly round 44063212.
 - **"M agents" counts (resident, agent bot) pairs.** Each resident's personal agent then counts once, even if every agent in the village shares one bot account.
-- **Daily limit.** The 3-per-day limit counts the last 24 hours, and demo capsules don't count. Letters are capped at 4,000 characters.
+- **Daily limit.** Residents may seal 3 letters in any 24 hours. Demo and burned capsules don't count, and admins are exempt. Letters are capped at 4,000 characters.
+- **After the unlock time** the bot stops sealing, because a letter sealed to an already-published round would open at once.
+- **`UNLOCK_AT` must include its timezone offset**, or the server would read it in its own timezone.
 
 ## Built here versus reused
 
