@@ -64,7 +64,7 @@ const CAPSULE_VIEW = `
   <p class="muted" data-label></p>
   <p class="opens">Opens <strong data-opens></strong></p>
   <div data-countdown></div>
-  <p class="muted small">Locked to drand quicknet round <strong data-round></strong>. Its key does not exist until the League of Entropy publishes that round.</p>
+  <p class="muted small" data-note>Locked to drand quicknet round <strong data-round></strong>. Its key does not exist until the League of Entropy publishes that round.</p>
   <div class="actions">
     <button data-try>Try to open now</button>
     <button class="ghost" data-download>Download .age file</button>
@@ -97,6 +97,8 @@ export function showCapsule(root: HTMLElement, c: { armored: string; round: numb
     el("errors").hidden = true;
     el("status").hidden = true;
     el("try").hidden = true;
+    el("countdown").hidden = true;
+    el("note").textContent = `The League of Entropy published the key for drand round #${c.round} on ${fmtIST(due)}.`;
     el("env").classList.add("opened");
     await sleep(reducedMotion() ? 0 : 900);
     const letter = el("letter");

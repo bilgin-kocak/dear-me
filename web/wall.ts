@@ -23,7 +23,9 @@ function envelope(c: WallCapsule) {
   el.dataset.id = c.id;
   el.style.setProperty("--tilt", `${tilt(c.id)}deg`);
   el.title = `Sealed ${fmtIST(Date.parse(c.sealedAt))}`;
-  el.innerHTML = `<span class="seal"></span>`;
+  el.innerHTML = c.kind === "village"
+    ? `<span class="seal"></span><span class="caption">ODIN's letter to the village</span>`
+    : `<span class="seal"></span>`;
   if (!firstRender) {
     el.classList.add("new");
     setTimeout(() => el.classList.remove("new"), 1600);
@@ -49,16 +51,29 @@ function render(w: Wall) {
   }
 
   const by = (kind: Kind) => w.capsules.filter((c) => c.kind === kind);
-  const [village, real, demo] = [by("village"), by("resident"), by("demo")];
-  sync($("#villageEnv"), village.slice(0, 1));
-  sync($("#real"), real);
-  sync($("#demo"), demo);
-  $("#village").hidden = village.length === 0;
-  $("#demoRow").hidden = demo.length === 0;
+  sync($("#real"), [...by("village").slice(0, 1), ...by("resident")]);
+  sync($("#demo"), by("demo"));
+  $("#demoRow").hidden = w.demoCount === 0;
   $("#empty").hidden = w.realCount > 0;
-  const n = real.length;
-  $("#real").style.setProperty("--env", n <= 12 ? "190px" : n <= 40 ? "140px" : n <= 100 ? "100px" : "70px");
+  fit();
   firstRender = false;
+}
+
+/** Picks the largest envelope size that keeps the whole wall on one projector screen. */
+function fit() {
+  const grid = $("#real");
+  if (innerWidth < 600) return grid.style.setProperty("--env", "72px"); // phones scroll instead
+  const cells = grid.children.length + (grid.querySelector(".village") ? 3 : 0);
+  const gap = parseFloat(getComputedStyle(grid).rowGap) || 24;
+  const below = ($("#demoRow").hidden ? 0 : $("#demoRow").offsetHeight + 48) + 80;
+  const height = Math.max(240, innerHeight - (grid.getBoundingClientRect().top + scrollY) - below);
+  let size = 220;
+  while (size > 44) {
+    const cols = Math.max(2, Math.floor((grid.clientWidth + gap) / (size + gap)));
+    if (Math.ceil(cells / cols) * (size * 5 / 7 + gap) <= height) break;
+    size -= 4;
+  }
+  grid.style.setProperty("--env", `${size}px`);
 }
 
 async function poll() {
@@ -74,3 +89,4 @@ async function poll() {
 
 poll();
 setInterval(poll, 10_000);
+addEventListener("resize", fit);

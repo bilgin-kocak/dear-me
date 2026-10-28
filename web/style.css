@@ -20,6 +20,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -124,8 +125,9 @@ textarea {
 .env.big.opened { margin-top: calc(var(--w) * 0.42 + 16px); }
 
 .env.village { background: linear-gradient(160deg, #f8eccc, #e5cf98); box-shadow: 0 0 0 2px var(--gold), 0 14px 40px rgb(214 168 78 / 0.25); }
+.env.village { container-type: inline-size; }
 .env.village .seal { width: 28%; background: radial-gradient(circle at 35% 30%, var(--gold-hi), var(--gold) 55%, #8a6420); display: grid; place-items: center; }
-.env.village .seal::after { content: "ODIN"; font: 700 clamp(8px, 1.1vw, 14px)/1 var(--serif); letter-spacing: 0.08em; color: #5a3f0e; }
+.env.village .seal::after { content: "ODIN"; font: 700 5cqw/1 var(--serif); letter-spacing: 0.08em; color: #5a3f0e; }
 .env.demo { opacity: 0.55; filter: saturate(0.3); outline: 1px dashed var(--muted); outline-offset: 4px; }
 
 .env.new { animation: drop 0.9s cubic-bezier(0.2, 0.8, 0.2, 1.2) both; }
