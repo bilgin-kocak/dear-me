@@ -168,7 +168,7 @@ export function createBot(
     const earlier = takePending(chatId);
     if (earlier) await ctx.api.deleteMessage(chatId, earlier.previewId).catch(() => {});
     const kind: Kind = earlier?.kind ?? (villageNext.delete(chatId) ? "village" : "resident");
-    if (kind !== "demo" && overLimit(ownerOf(ctx))) return ctx.reply(limitMessage);
+    if (overLimit(ownerOf(ctx))) return ctx.reply(limitMessage);
 
     const info: { kind: Kind; ackId?: number } = { kind };
     collecting.set(chatId, info);
