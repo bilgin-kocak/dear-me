@@ -12,6 +12,7 @@ import { loadConfig } from "../src/config.ts";
 import { openStore } from "../src/db.ts";
 import { saltedHash } from "../src/hash.ts";
 import { inspectCapsule } from "../src/lock.ts";
+import { sealCapsule } from "../src/seal.ts";
 import { stdoutLog, type Log } from "../src/log.ts";
 
 const PARTS = [
@@ -69,10 +70,11 @@ function harness({ log = stdoutLog as Log, admin = true, env = {} as Record<stri
     previewId: () => withButton("seal"),
     command: (text: string) => message({ text, entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0].length }] }),
     typed: (text: string) => message({ text }),
-    forward: (text: string, sender = AGENT) =>
-      message({ text, forward_origin: { type: "user", date: 1_700_000_000, sender_user: sender } }),
-    album: (group: string, caption?: string) =>
-      message({ media_group_id: group, photo: [{ file_id: "p", file_unique_id: "p", width: 1, height: 1 }], ...(caption ? { caption } : {}), ...fromAgent }),
+    /** date: when the agent originally sent it (parts of one reply are seconds apart). */
+    forward: (text: string, sender = AGENT, date = 1_700_000_000) =>
+      message({ text, forward_origin: { type: "user", date, sender_user: sender } }),
+    album: (group: string, caption?: string, forwarded = true) =>
+      message({ media_group_id: group, photo: [{ file_id: "p", file_unique_id: "p", width: 1, height: 1 }], ...(caption ? { caption } : {}), ...(forwarded ? fromAgent : {}) }),
     edit: (id: number, text: string) =>
       feed({ edited_message: { message_id: id, date: 1_700_000_000, edit_date: 1_700_000_100, chat: CHAT, from: USER, text } }),
     /** Taps a button on the newest bot message that has it (the preview, the acknowledgement…). */
@@ -232,7 +234,7 @@ test("after a preview, typed text is not merged and a new forward starts a new l
   await h.typed("ok seal it");
   assert.equal(h.sent().at(-1), "Tap Seal or Cancel on the preview above first.");
 
-  await h.forward("Letter B from the agent.");
+  await h.forward("Letter B from the agent.", AGENT, 1_700_000_300); // a new reply, minutes later
   assert.match(h.sent().at(-1)!, /^That starts a new letter, so I discarded the previous preview\./);
   assert.ok(h.calls.some((c) => c.method === "deleteMessage" && c.payload.message_id === previewA), "old preview removed");
   await h.press("flush");
@@ -302,13 +304,17 @@ test("residents may seal 3 letters a day; burned and demo capsules don't count, 
   const h = harness({ ...quiet, admin: false });
   await agree(h);
   for (let i = 0; i < 3; i++) {
+    await sealCapsule(h.store, { text: "demo", kind: "demo", round: h.cfg.round, ownerHash: h.owner, agentHash: null, source: "unverified" });
+  }
+  for (let i = 0; i < 3; i++) {
     await h.forward(`Letter number ${i}`);
     await h.press("flush");
     await h.press("seal");
   }
+  assert.equal(h.store.listMine(h.owner).filter((c) => c.kind === "resident").length, 3, "demo capsules don't use up the limit");
   await h.forward("Letter number 4");
   assert.match(h.sent().at(-1)!, /which is the limit/);
-  await h.command(`/burn ${h.store.listMine(h.owner)[0].id}`);
+  await h.command(`/burn ${h.store.listMine(h.owner).find((c) => c.kind === "resident")!.id}`);
   await h.forward("Letter number 5");
   assert.match(h.sent().at(-1)!, /I'll wait 90 seconds/);
   h.store.close();
@@ -387,5 +393,95 @@ test("after the unlock time the bot stops sealing", async () => {
   await h.forward("A letter for a year that has passed.");
   assert.match(h.sent().at(-1)!, /^Sealing closed/);
   assert.equal(h.store.listMine(h.owner).length, 0);
+  h.store.close();
+});
+
+test("a late part of the same reply goes back into its letter, in order", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.forward(PARTS[0]);
+  await h.forward(PARTS[1]);
+  await h.press("flush");
+  await h.forward(PARTS[2], AGENT, 1_700_000_002); // the straggler, sent two seconds later
+  assert.match(h.sent().at(-1)!, /^Added that to the letter\./);
+  await h.press("flush");
+  const preview = h.sent().at(-1)!;
+  assert.ok(preview.includes(PARTS[0].slice(0, 60)), "the letter still starts with part one");
+  assert.match(preview, /3 parts · Written by an agent/);
+  h.store.close();
+});
+
+test("a duplicate forward is deleted on Seal with the rest", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.forward(PARTS[0]);
+  const first = h.lastMessageId();
+  await h.forward(PARTS[0]);
+  const copy = h.lastMessageId();
+  await h.press("flush");
+  const previewId = h.previewId();
+  await h.press("seal");
+  assert.deepEqual(h.calls.find((c) => c.method === "deleteMessages")!.payload.message_ids, [first, copy, previewId]);
+  h.store.close();
+});
+
+test("ODIN's forward joining a note typed after /village makes it ODIN's letter", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.command("/village");
+  await h.typed("Here is ODIN's verse:");
+  await h.forward("To the village, in verse.");
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /^<b>ODIN's letter to the village<\/b>/);
+  await h.press("seal");
+  assert.equal(h.store.listMine(h.owner)[0].kind, "village");
+  await h.forward("The admin's own letter.", AGENT, 1_700_000_600);
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /^<b>Preview<\/b>/, "the flag is used up");
+  h.store.close();
+});
+
+test("album photos that arrive before the caption join the letter, and the text-only notice goes", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.album("g2");
+  const ids = [h.lastMessageId()];
+  const notice = h.calls.filter((c) => c.method === "sendMessage").at(-1)!;
+  assert.equal(notice.payload.text, "I can only seal text. Forward your agent's text reply.");
+  await h.album("g2");
+  ids.push(h.lastMessageId());
+  await h.album("g2", "Dear Asha, the caption came last.");
+  ids.push(h.lastMessageId());
+  const noticeId = (notice.result as { message_id: number }).message_id;
+  assert.ok(h.calls.some((c) => c.method === "deleteMessage" && c.payload.message_id === noticeId), "notice removed");
+  await h.press("flush");
+  const previewId = h.previewId();
+  await h.press("seal");
+  assert.deepEqual(new Set(h.calls.find((c) => c.method === "deleteMessages")!.payload.message_ids), new Set([...ids, previewId]));
+  h.store.close();
+});
+
+test("the resident's own album photos are never deleted", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.album("g3", "Dear me, my own photo album.", false);
+  await h.album("g3", undefined, false);
+  await h.press("flush");
+  const previewId = h.previewId();
+  await h.press("seal");
+  assert.deepEqual(h.calls.find((c) => c.method === "deleteMessages")!.payload.message_ids, [previewId]);
+  h.store.close();
+});
+
+test("a second tap on 'That's everything' after a too-long letter stays quiet", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.forward("z".repeat(MAX_CHARS + 100));
+  const ack = h.calls.filter((c) => c.method === "sendMessage").at(-1)!;
+  const ackId = (ack.result as { message_id: number }).message_id;
+  await h.press("flush", ackId);
+  assert.match(h.sent().at(-1)!, /The limit is 4,000/);
+  await h.press("flush", ackId);
+  assert.match(h.sent().at(-1)!, /The limit is 4,000/, "no restart message");
   h.store.close();
 });

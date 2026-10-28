@@ -1,6 +1,6 @@
 // Opening a capsule in the browser: the "too early" attempt, waiting for the
 // round, and the capsule view shared by /c/:id and /open.
-import { CHAIN, RELAYS, beaconUrl, isTooEarly, open, quicknet, timeOfRound } from "../src/lock.ts";
+import { CHAIN, RELAYS, beaconUrl, isTooEarly, open, openWithBeacon, timeOfRound } from "../src/lock.ts";
 import { $, countdown, download, fmtIST, reducedMotion, revealInView, showErrors, sleep, typewriter } from "./ui.ts";
 
 /** AbortSignal.timeout() arrived in Safari 16; iOS 15 phones need the fallback. */
@@ -43,12 +43,11 @@ export async function tryOpenNow(armored: string, round: number): Promise<{ text
   }
 }
 
-/** Retrying helps while the key isn't out yet or a relay hiccups. A damaged capsule fails for good. */
-const transient = (err: unknown) => isTooEarly(err) || /fetch|network|Error response/i.test(String((err as Error)?.message));
-
 /**
  * Waits for the round's time, then polls drand every second and opens the capsule as
- * soon as the beacon exists. Throws if the capsule itself cannot be opened.
+ * soon as the beacon exists. Fetching is retried whatever the error (every browser words
+ * network failures differently); once the beacon is here, a failure means the capsule
+ * itself is damaged, and that is thrown.
  */
 export async function openWhenDue(
   armored: string,
@@ -60,19 +59,21 @@ export async function openWhenDue(
   let relay = 0;
   for (let attempt = 1; ; attempt++) {
     if (signal?.aborted) throw new Error("stopped");
-    let published = false;
+    let beacon;
     try {
       const res = await get(beaconUrl(round, RELAYS[relay]));
-      published = res.ok;
-      if (res.status >= 500) relay = (relay + 1) % RELAYS.length;
+      if (res.ok) beacon = await res.json();
+      else if (res.status >= 500) relay = (relay + 1) % RELAYS.length;
     } catch {
       relay = (relay + 1) % RELAYS.length; // this relay is unreachable or slow: try the next one
     }
-    if (published) {
+    if (beacon) {
       try {
-        return await open(armored, quicknet(RELAYS[relay]));
+        return await openWithBeacon(armored, beacon, RELAYS[relay]);
       } catch (err) {
-        if (!transient(err)) throw err;
+        // Worth another try only if this device's clock is behind drand, or the relay sent a bad beacon.
+        if (!isTooEarly(err) && !/beacon/i.test(String((err as Error)?.message))) throw err;
+        relay = (relay + 1) % RELAYS.length;
       }
     }
     onWaiting?.(attempt);
@@ -132,6 +133,7 @@ export function showCapsule(root: HTMLElement, c: { armored: string; round: numb
     el.letter.style.minHeight = `${el.letter.offsetHeight}px`;
     revealInView(el.letter);
     await typewriter(el.letter, text);
+    el.letter.style.minHeight = ""; // let the letter follow rotations and resizes again
     el.proof.innerHTML = `Opened by drand round <a target="_blank" rel="noreferrer"></a>`;
     const a = $<HTMLAnchorElement>("a", el.proof);
     a.href = beaconUrl(c.round);

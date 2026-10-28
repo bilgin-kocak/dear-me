@@ -20,6 +20,7 @@ const id = decodeURIComponent(location.pathname.split("/").pop() ?? "");
 const root = $("#capsule");
 
 function notice(heading: string, text: string) {
+  if ($("h1", root)?.textContent === heading) return; // already shown: keep the reader's focus
   root.innerHTML = `
     <div class="env big"><span class="seal"></span></div>
     <h1 class="title"></h1>

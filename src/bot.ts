@@ -17,11 +17,25 @@ const PREVIEW_CHARS = 80;
 const PREVIEW_TTL_MS = 30 * 60_000; // an unanswered preview is forgotten after 30 minutes
 const MINE_PAGE = 10; // capsules per /mine message, well inside Telegram's 4,096 characters
 
-type Part = { messageId: number; text: string; origin: Origin; forwarded: boolean };
-/** A letter being collected while its merge window is open. */
-type Letter = { kind: Kind; ackId?: number; albumIds: number[] };
+/** sentAt is when the original was sent (the forward's origin date), in Unix seconds. */
+type Part = { messageId: number; text: string; origin: Origin; forwarded: boolean; sentAt: number };
+/**
+ * A letter being collected while its merge window is open. extraIds are forwarded messages
+ * deleted on Seal besides the parts: album photos and duplicate forwards.
+ */
+type Letter = { kind: Kind; ackId?: number; extraIds: number[] };
 /** A collected letter waiting for Seal or Cancel on its preview. */
-type Pending = { kind: Kind; albumIds: number[]; parts: Part[]; previewId?: number; expiry?: ReturnType<typeof setTimeout> };
+type Pending = { kind: Kind; extraIds: number[]; parts: Part[]; previewId?: number; expiry?: ReturnType<typeof setTimeout> };
+/** Captionless album photos that arrived before the album's caption started a letter. */
+type Stray = { group: string; ids: number[]; noticeId?: number };
+
+const TEXT_ONLY = "I can only seal text. Forward your agent's text reply.";
+const SAME_REPLY_S = 60; // an agent sends the parts of one reply within seconds of each other
+
+/** A forward that belongs to the same agent reply as these parts: same sender, sent moments apart. */
+const sameReply = (parts: Part[], part: Part) =>
+  parts.every((x) => x.forwarded && x.origin.source === part.origin.source &&
+    x.origin.agentUsername === part.origin.agentUsername && Math.abs(x.sentAt - part.sentAt) <= SAME_REPLY_S);
 
 const KIND_LABEL: Record<Kind, string> = {
   resident: "Letter from your agent",
@@ -58,7 +72,8 @@ export function createBot(
   const collecting = new Map<number, Letter>();
   const pending = new Map<number, Pending>();
   const villageNext = new Set<number>(); // admin chats whose next forwarded letter is ODIN's
-  const albumNoticed = new Map<number, string>(); // chat -> the album already told "text only"
+  const strays = new Map<number, Stray>(); // chat -> photos of an album whose caption hasn't come yet
+  const lastAck = new Map<number, number>(); // chat -> the newest "That's everything" message sent
 
   const ownerOf = (ctx: Context) => saltedHash(cfg.hashSalt, "owner", ctx.from!.id);
   const isAdmin = (ctx: Context) => cfg.adminIds.has(ctx.from?.id ?? Number.NaN);
@@ -66,6 +81,7 @@ export function createBot(
   const html = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
   const agreeButton = new InlineKeyboard().text("I agree", "consent");
   const previewButtons = new InlineKeyboard().text(`Seal until ${dateIST(cfg.unlockMs)}`, "seal").text("Cancel", "cancel");
+  const flushButton = new InlineKeyboard().text("That's everything", "flush");
   // Admins rehearse a lot and seal ODIN's letter, so the limit is for residents.
   const overLimit = (ctx: Context) =>
     !isAdmin(ctx) && store.sealedSince(ownerOf(ctx), new Date(Date.now() - 86_400_000).toISOString()) >= MAX_PER_DAY;
@@ -122,10 +138,10 @@ export function createBot(
   }
 
   async function showPreview(chatId: number, parts: Part[]) {
-    const letter: Letter = collecting.get(chatId) ?? { kind: "resident", albumIds: [] };
+    const letter: Letter = collecting.get(chatId) ?? { kind: "resident", extraIds: [] };
     collecting.delete(chatId);
     const length = mergeText(parts).length;
-    const p: Pending | undefined = length > MAX_CHARS ? undefined : { kind: letter.kind, albumIds: letter.albumIds, parts };
+    const p: Pending | undefined = length > MAX_CHARS ? undefined : { kind: letter.kind, extraIds: letter.extraIds, parts };
     if (p) hold(chatId, p); // before any await, so a message arriving meanwhile sees this letter
     try {
       await deleteQuietly(chatId, letter.ackId);
@@ -145,6 +161,16 @@ export function createBot(
         await bot.api.sendMessage(chatId, "Something went wrong showing the preview. Please forward the letter again.").catch(() => {});
       }
     }
+  }
+
+  /** Opens the merge window for a letter and acknowledges it with a "That's everything" button. */
+  async function collect(ctx: Context, chatId: number, letter: Letter, parts: Part[], ackText: string) {
+    collecting.set(chatId, letter);
+    for (const p of parts) windows.add(chatId, p);
+    const ack = await ctx.reply(ackText, { reply_markup: flushButton });
+    lastAck.set(chatId, ack.message_id);
+    if (collecting.get(chatId) === letter) letter.ackId = ack.message_id;
+    else await deleteQuietly(chatId, ack.message_id); // the window already closed
   }
 
   const pm = bot.chatType("private");
@@ -212,41 +238,65 @@ export function createBot(
     if (!store.hasConsent(ownerOf(ctx))) {
       return ctx.reply(`Before I seal anything, please read this and tap I agree. Then forward the letter again.\n\n${T.consent(cfg.unlockMs)}`, { ...html, reply_markup: agreeButton });
     }
+    const album = msg.media_group_id;
     if (!text.trim()) {
-      // An album arrives as one message per photo, and only the captioned one carries text.
-      if (msg.media_group_id) {
-        const letter = collecting.get(chatId);
-        if (letter) return void letter.albumIds.push(msg.message_id);
-        if (albumNoticed.get(chatId) === msg.media_group_id) return;
-        albumNoticed.set(chatId, msg.media_group_id);
-      }
-      return ctx.reply("I can only seal text. Forward your agent's text reply.");
-    }
-
-    const part: Part = { messageId: msg.message_id, text, origin: classifyOrigin(msg), forwarded };
-    const collected = windows.peek(chatId);
-    if (collected) {
-      // Forwarding the same part twice must not double the letter.
-      if (!collected.some((x) => x.text.trim() === text.trim())) windows.add(chatId, part);
+      if (!album) return ctx.reply(TEXT_ONLY);
+      // An album arrives as one message per photo, and only one of them carries the caption.
+      // Forwarded photos are deleted on Seal with the letter; the resident's own are left alone.
+      const letter = collecting.get(chatId);
+      if (letter) return void (forwarded && letter.extraIds.push(msg.message_id));
+      const stray = strays.get(chatId);
+      if (stray?.group === album) return void (forwarded && stray.ids.push(msg.message_id));
+      const s: Stray = { group: album, ids: forwarded ? [msg.message_id] : [] };
+      strays.set(chatId, s);
+      const notice = await ctx.reply(TEXT_ONLY);
+      if (strays.get(chatId) === s) s.noticeId = notice.message_id; // removed if the album's caption turns up
+      else await deleteQuietly(chatId, notice.message_id);
       return;
     }
+
+    const part: Part = {
+      messageId: msg.message_id, text, origin: classifyOrigin(msg), forwarded, sentAt: msg.forward_origin?.date ?? msg.date,
+    };
+    const open = collecting.get(chatId);
+    if (open) {
+      // The same part forwarded twice counts once, and the copy is still deleted on Seal.
+      if (windows.peek(chatId)?.some((x) => x.text.trim() === text.trim())) {
+        return void (forwarded && open.extraIds.push(msg.message_id));
+      }
+      windows.add(chatId, part);
+      // ODIN's forward can join a letter that a note typed after /village opened.
+      if (forwarded && villageNext.delete(chatId)) open.kind = "village";
+      return;
+    }
+    const secs = Math.round(windowMs / 1000);
+    const earlier = pending.get(chatId);
     let replaced = false;
-    if (pending.has(chatId)) {
+    if (earlier) {
       if (!forwarded) return ctx.reply("Tap Seal or Cancel on the preview above first.");
-      replaced = await discardLetter(chatId); // a new forward starts a new letter
+      if (sameReply(earlier.parts, part)) {
+        // A late part of the same reply goes back into its letter, in order.
+        takePending(chatId);
+        await deleteQuietly(chatId, earlier.previewId);
+        const copy = earlier.parts.some((x) => x.text.trim() === text.trim());
+        log("collecting", { message_id: msg.message_id, kind: earlier.kind, reopened: true });
+        return collect(ctx, chatId, { kind: earlier.kind, extraIds: copy ? [...earlier.extraIds, msg.message_id] : earlier.extraIds },
+          copy ? earlier.parts : [...earlier.parts, part],
+          `Added that to the letter. I'll wait ${secs} seconds in case there are more parts.`);
+      }
+      replaced = await discardLetter(chatId); // a different reply starts a new letter
     }
     if (overLimit(ctx)) return ctx.reply(limitMessage);
 
-    const letter: Letter = { kind: forwarded && villageNext.delete(chatId) ? "village" : "resident", albumIds: [] };
-    collecting.set(chatId, letter);
-    windows.add(chatId, part);
-    log("collecting", { message_id: msg.message_id, kind: letter.kind });
-    const ack = await ctx.reply(
-      `${replaced ? "That starts a new letter, so I discarded the previous preview. " : "Got it. "}I'll wait ${Math.round(windowMs / 1000)} seconds in case the reply came in several parts. Forward any other parts now.`,
-      { reply_markup: new InlineKeyboard().text("That's everything", "flush") },
-    );
-    if (collecting.get(chatId) === letter) letter.ackId = ack.message_id;
-    else await deleteQuietly(chatId, ack.message_id); // the window already closed
+    // Photos of this album that arrived before its caption join the letter, and the notice goes.
+    const stray = strays.get(chatId);
+    strays.delete(chatId);
+    const adopted = album && stray?.group === album ? stray : undefined;
+    if (adopted) await deleteQuietly(chatId, adopted.noticeId);
+    const kind: Kind = forwarded && villageNext.delete(chatId) ? "village" : "resident";
+    log("collecting", { message_id: msg.message_id, kind });
+    await collect(ctx, chatId, { kind, extraIds: adopted?.ids ?? [] }, [part],
+      `${replaced ? "That starts a new letter, so I discarded the previous preview. " : "Got it. "}I'll wait ${secs} seconds in case the reply came in several parts. Forward any other parts now.`);
   });
 
   // Fixing a typo in a typed letter updates the letter and its preview.
@@ -267,12 +317,14 @@ export function createBot(
   pm.callbackQuery("flush", async (ctx) => {
     const chatId = ctx.chat.id;
     await ctx.answerCallbackQuery().catch(() => {});
+    const tappedId = ctx.callbackQuery.message?.message_id;
     const letter = collecting.get(chatId);
     if (letter && windows.isOpen(chatId)) {
-      if (letter.ackId === undefined || letter.ackId === ctx.callbackQuery.message?.message_id) return windows.close(chatId);
+      if (letter.ackId === undefined || letter.ackId === tappedId) return windows.close(chatId);
       return;
     }
-    if (pending.has(chatId)) return; // a second tap: the preview is already here
+    // Already handled here: a second tap, or the window closed itself a moment ago.
+    if (pending.has(chatId) || lastAck.get(chatId) === tappedId) return;
     await ctx.deleteMessage().catch(() => {});
     await ctx.reply("Nothing is waiting any more, probably because I restarted. Please forward the letter again.");
   });
@@ -341,7 +393,7 @@ export function createBot(
     log("sealed", { kind: p.kind, parts: forwardedIds.length + typed, source: origin.source });
 
     // Only forwarded messages are deleted: what the resident typed here may be their only copy.
-    const cleaned = await ctx.api.deleteMessages(chatId, [...forwardedIds, ...p.albumIds, p.previewId!]).then(
+    const cleaned = await ctx.api.deleteMessages(chatId, [...forwardedIds, ...p.extraIds, p.previewId!]).then(
       () => true,
       (err) => {
         log("error", { where: "delete_messages", error: describe(err) });

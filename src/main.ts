@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server";
+import { GrammyError } from "grammy";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BOT_COMMANDS, createBot } from "./bot.ts";
 import { loadConfig } from "./config.ts";
@@ -21,13 +22,19 @@ const bot = cfg.botToken ? createBot(cfg, store, log) : undefined;
 let polling: Promise<void> | undefined;
 let stopping = false;
 
-// The pages never need Telegram. If polling fails (409: another process uses this
-// token, 401: the token was revoked), keep serving and try the bot again later.
+// The pages never need Telegram, so a polling failure never stops the web server.
+// 409 means another process polls with this token: the deployed bot (NODE_ENV=production)
+// takes polling back within seconds, and any other run, like a laptop, gives it up.
 function startBot() {
   if (!bot || stopping) return;
   polling = bot.start({ onStart: (me) => log("bot_started", { bot: me.username }) }).catch((err) => {
+    const conflict = err instanceof GrammyError && err.error_code === 409;
     log("error", { where: "bot_polling", error: brief(err) });
-    if (!stopping) setTimeout(startBot, 30_000);
+    if (stopping) return;
+    if (conflict && process.env.NODE_ENV !== "production") {
+      return log("bot_yielded", { reason: "another process polls with this bot token; serving the web pages only" });
+    }
+    setTimeout(startBot, conflict ? 5_000 : 30_000);
   });
 }
 

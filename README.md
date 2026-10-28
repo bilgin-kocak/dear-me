@@ -173,6 +173,9 @@ fly scale count 1
 - Start command `node src/main.ts`. Call node directly rather than `npm start`, so the shutdown signal reaches the app.
 - Keep the instance always on (not a free instance that sleeps), for the same long-polling reason.
 - Attach a disk at `/data` and set `DB_PATH=/data/dear-me.db` plus the variables in `.env.example`.
+- Set `NODE_ENV=production` (the Dockerfile already does). If another process starts polling with the same bot token, the deployed bot takes polling back within seconds, and any other run gives it up.
+
+For local experiments with the bot, use a second bot from BotFather, so a laptop never takes messages meant for the deployed bot.
 
 ## Notes
 

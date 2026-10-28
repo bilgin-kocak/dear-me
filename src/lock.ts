@@ -47,6 +47,17 @@ export async function open(armored: string, client = quicknet()): Promise<string
   return (await timelockDecrypt(armored, client)).toString("utf8");
 }
 
+type Beacon = Awaited<ReturnType<ChainClient["get"]>>;
+
+/**
+ * Opens with a beacon that was already fetched, so decryption makes no second request.
+ * drand-client still verifies it against the pinned public key.
+ */
+export function openWithBeacon(armored: string, beacon: Beacon, relay = RELAYS[0]): Promise<string> {
+  const client = quicknet(relay);
+  return open(armored, { options: client.options, chain: () => client.chain(), get: async () => beacon, latest: async () => beacon });
+}
+
 export const isTooEarly = (err: unknown) => /too early/i.test(String((err as Error)?.message));
 
 const BEGIN = "-----BEGIN AGE ENCRYPTED FILE-----";
