@@ -39,7 +39,7 @@ export const privacy = (unlockMs: number) => [
   consent(unlockMs),
   "",
   "• I hold your letter in memory only until you tap Seal. It is never written to our database, files or logs. Only the time-locked ciphertext is stored.",
-  "• After sealing I delete your forwarded messages and the preview from this chat. The original is still in your agent's chat.",
+  "• After sealing I delete the forwarded messages and the preview from this chat. The original is still in your agent's chat. Anything you typed yourself stays here for you to delete.",
   "• I store a salted hash of your Telegram id (for consent, /mine and limits) and, for agent-written letters, a salted hash of the agent's bot username (only to count unique agents).",
   "• I never connect to, change or read your Agent Village agent. Letters are written by residents' own agents and forwarded by the residents.",
 ].join("\n");

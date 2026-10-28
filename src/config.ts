@@ -6,12 +6,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const port = Number(env.PORT ?? 3000);
   const botToken = env.TELEGRAM_BOT_TOKEN || undefined;
   const unlockAt = env.UNLOCK_AT ?? "2027-10-31T20:00:00+05:30";
+  // Without an offset, Date.parse would read the time in the host's timezone (UTC on most servers).
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(unlockAt)) {
+    throw new Error(`UNLOCK_AT needs a timezone offset, like 2027-10-31T20:00:00+05:30 (got ${unlockAt})`);
+  }
   const unlockMs = Date.parse(unlockAt);
   if (Number.isNaN(unlockMs)) throw new Error(`UNLOCK_AT is not a date: ${unlockAt}`);
   const round = roundForUnlock(unlockMs);
 
-  const hashSalt = env.HASH_SALT ?? (botToken ? "" : "dev-only-salt");
-  if (!hashSalt) throw new Error("HASH_SALT must be set when the bot runs");
+  // The salt keys every owner and agent hash, so it must be secret and must never change.
+  const hashSalt = env.HASH_SALT ?? "";
+  if (botToken && (hashSalt.length < 16 || hashSalt.includes("replace-with"))) {
+    throw new Error("HASH_SALT must be a long random secret when the bot runs, e.g. the output of: openssl rand -base64 32");
+  }
 
   return {
     port,
@@ -21,7 +28,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     round,
     unlockMs: timeOfRound(round),
     dbPath: env.DB_PATH ?? "data/dear-me.db",
-    hashSalt,
+    hashSalt: hashSalt || "dev-only-salt", // web-only runs hash nothing personal
   };
 }
 

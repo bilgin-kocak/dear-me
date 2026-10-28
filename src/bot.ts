@@ -6,7 +6,7 @@ import { saltedHash } from "./hash.ts";
 import { calendarFile } from "./ics.ts";
 import { roundIn } from "./lock.ts";
 import type { Log } from "./log.ts";
-import { createMergeWindow, MERGE_WINDOW_MS, mergeText } from "./merge.ts";
+import { backgroundTimer, createMergeWindow, MERGE_WINDOW_MS, mergeText } from "./merge.ts";
 import { classifyOrigin, combineOrigins, SOURCE_LABEL, type Origin } from "./origin.ts";
 import { sealCapsule } from "./seal.ts";
 import * as T from "./texts.ts";
@@ -15,15 +15,25 @@ export const MAX_CHARS = 4000;
 export const MAX_PER_DAY = 3;
 const PREVIEW_CHARS = 80;
 const PREVIEW_TTL_MS = 30 * 60_000; // an unanswered preview is forgotten after 30 minutes
+const MINE_PAGE = 10; // capsules per /mine message, well inside Telegram's 4,096 characters
 
-type Part = { messageId: number; text: string; origin: Origin };
-type Pending = { parts: Part[]; kind: Kind; previewId: number; expiry: ReturnType<typeof setTimeout> };
+type Part = { messageId: number; text: string; origin: Origin; forwarded: boolean };
+/** A letter being collected while its merge window is open. */
+type Letter = { kind: Kind; ackId?: number; albumIds: number[] };
+/** A collected letter waiting for Seal or Cancel on its preview. */
+type Pending = { kind: Kind; albumIds: number[]; parts: Part[]; previewId?: number; expiry?: ReturnType<typeof setTimeout> };
 
 const KIND_LABEL: Record<Kind, string> = {
   resident: "Letter from your agent",
   village: "ODIN's letter to the village",
   demo: "Demo",
 };
+
+/** A resident's capsule is named after who wrote it. */
+const capsuleLabel = (c: Pick<Capsule, "kind" | "source">) =>
+  c.kind !== "resident" ? KIND_LABEL[c.kind]
+    : c.source === "agent" ? KIND_LABEL.resident
+      : c.source === "resident" ? "Letter you wrote" : "Sealed letter (unverified)";
 
 const DEMO_LETTER = `Dear Sam,
 
@@ -41,73 +51,112 @@ export function createBot(
 ) {
   if (!cfg.botToken) throw new Error("TELEGRAM_BOT_TOKEN is not set");
   const bot = new Bot(cfg.botToken, { botInfo: opts.botInfo });
+  const windowMs = opts.mergeWindowMs ?? MERGE_WINDOW_MS;
 
-  // Plaintext lives only in these two in-memory structures, and only until Seal, Cancel or expiry.
-  const windows = createMergeWindow<Part>(opts.mergeWindowMs ?? MERGE_WINDOW_MS, (chatId, parts) => showPreview(chatId, parts));
+  // Plaintext lives only in the merge window and in `pending`, and only until Seal, Cancel or expiry.
+  const windows = createMergeWindow<Part>(windowMs, (chatId, parts) => showPreview(chatId, parts));
+  const collecting = new Map<number, Letter>();
   const pending = new Map<number, Pending>();
-  const collecting = new Map<number, { kind: Kind; ackId?: number }>();
-  const villageNext = new Set<number>(); // admin chats whose next letter is ODIN's
+  const villageNext = new Set<number>(); // admin chats whose next forwarded letter is ODIN's
+  const albumNoticed = new Map<number, string>(); // chat -> the album already told "text only"
 
   const ownerOf = (ctx: Context) => saltedHash(cfg.hashSalt, "owner", ctx.from!.id);
   const isAdmin = (ctx: Context) => cfg.adminIds.has(ctx.from?.id ?? Number.NaN);
   const link = (id: string) => `${cfg.publicBaseUrl}/c/${id}`;
   const html = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
   const agreeButton = new InlineKeyboard().text("I agree", "consent");
-  const overLimit = (ownerHash: string) =>
-    store.sealedSince(ownerHash, new Date(Date.now() - 86_400_000).toISOString()) >= MAX_PER_DAY;
+  const previewButtons = new InlineKeyboard().text(`Seal until ${dateIST(cfg.unlockMs)}`, "seal").text("Cancel", "cancel");
+  // Admins rehearse a lot and seal ODIN's letter, so the limit is for residents.
+  const overLimit = (ctx: Context) =>
+    !isAdmin(ctx) && store.sealedSince(ownerOf(ctx), new Date(Date.now() - 86_400_000).toISOString()) >= MAX_PER_DAY;
   const limitMessage = `You've sealed ${MAX_PER_DAY} letters in the last 24 hours, which is the limit. Try again tomorrow.`;
+  const tooLong = (n: number) =>
+    `That letter is ${n.toLocaleString("en")} characters. The limit is ${MAX_CHARS.toLocaleString("en")}, so ask your agent for a shorter one (the prompt asks for under 300 words) and forward it again.`;
+  // Once drand has published the unlock round, a letter "sealed" to it would open at once.
+  const sealingClosed = () => Date.now() >= cfg.unlockMs;
+  const closedMessage = () =>
+    `Sealing closed at ${dateTimeIST(cfg.unlockMs)}, when the letters opened. Capsule links and files still work.`;
+  const deleteQuietly = (chatId: number, messageId?: number) =>
+    messageId ? bot.api.deleteMessage(chatId, messageId).then(() => {}, () => {}) : Promise.resolve();
+
+  /** Keeps a collected letter until Seal or Cancel, or forgets it after PREVIEW_TTL_MS. */
+  function hold(chatId: number, p: Pending) {
+    clearTimeout(p.expiry);
+    pending.set(chatId, p);
+    p.expiry = backgroundTimer(() => {
+      if (pending.get(chatId) !== p) return;
+      pending.delete(chatId);
+      log("preview_expired", { parts: p.parts.length });
+      void deleteQuietly(chatId, p.previewId);
+    }, PREVIEW_TTL_MS);
+  }
 
   function takePending(chatId: number) {
     const p = pending.get(chatId);
-    if (p) clearTimeout(p.expiry);
+    clearTimeout(p?.expiry);
     pending.delete(chatId);
     return p;
   }
 
-  async function showPreview(chatId: number, parts: Part[]) {
-    try {
-      const { kind = "resident", ackId } = collecting.get(chatId) ?? {};
-      collecting.delete(chatId);
-      if (ackId) await bot.api.deleteMessage(chatId, ackId).catch(() => {});
+  /** Throws away the chat's letter in progress, if any, with its acknowledgement or preview. */
+  async function discardLetter(chatId: number) {
+    const letter = collecting.get(chatId);
+    collecting.delete(chatId);
+    windows.discard(chatId);
+    const p = takePending(chatId);
+    await deleteQuietly(chatId, letter?.ackId);
+    await deleteQuietly(chatId, p?.previewId);
+    return Boolean(letter || p);
+  }
 
-      const text = mergeText(parts);
-      if (text.length > MAX_CHARS) {
-        log("rejected_too_long", { parts: parts.length, chars: text.length });
-        await bot.api.sendMessage(chatId, `That letter is ${text.length.toLocaleString("en")} characters. The limit is ${MAX_CHARS.toLocaleString("en")}, so ask your agent for a shorter one (the prompt asks for under 300 words) and forward it again.`);
+  function previewText(p: Pending) {
+    const text = mergeText(p.parts);
+    const head = Array.from(text).slice(0, PREVIEW_CHARS).join("");
+    const origin = combineOrigins(p.parts.map((x) => x.origin));
+    return [
+      `<b>${p.kind === "village" ? KIND_LABEL.village : "Preview"}</b>`,
+      `<i>${T.esc(head)}${head.length < text.length ? "…" : ""}</i>`,
+      "",
+      `${text.length.toLocaleString("en")} characters · ${p.parts.length} ${p.parts.length === 1 ? "part" : "parts"} · ${SOURCE_LABEL[origin.source]}`,
+    ].join("\n");
+  }
+
+  async function showPreview(chatId: number, parts: Part[]) {
+    const letter: Letter = collecting.get(chatId) ?? { kind: "resident", albumIds: [] };
+    collecting.delete(chatId);
+    const length = mergeText(parts).length;
+    const p: Pending | undefined = length > MAX_CHARS ? undefined : { kind: letter.kind, albumIds: letter.albumIds, parts };
+    if (p) hold(chatId, p); // before any await, so a message arriving meanwhile sees this letter
+    try {
+      await deleteQuietly(chatId, letter.ackId);
+      if (!p) {
+        log("rejected_too_long", { parts: parts.length, chars: length });
+        await bot.api.sendMessage(chatId, tooLong(length));
         return;
       }
-      const origin = combineOrigins(parts.map((p) => p.origin));
-      const head = Array.from(text).slice(0, PREVIEW_CHARS).join("");
-      const preview = await bot.api.sendMessage(chatId, [
-        `<b>${kind === "village" ? KIND_LABEL.village : "Preview"}</b>`,
-        `<i>${T.esc(head)}${head.length < text.length ? "…" : ""}</i>`,
-        "",
-        `${text.length.toLocaleString("en")} characters · ${parts.length} ${parts.length === 1 ? "part" : "parts"} · ${SOURCE_LABEL[origin.source]}`,
-      ].join("\n"), {
-        ...html,
-        reply_markup: new InlineKeyboard().text(`Seal until ${dateIST(cfg.unlockMs)}`, "seal").text("Cancel", "cancel"),
-      });
-      const expiry = setTimeout(() => {
-        if (!takePending(chatId)) return;
-        log("preview_expired", { parts: parts.length });
-        bot.api.deleteMessage(chatId, preview.message_id).catch(() => {});
-      }, PREVIEW_TTL_MS);
-      pending.set(chatId, { parts, kind, previewId: preview.message_id, expiry });
-      log("preview", { parts: parts.length, chars: text.length, source: origin.source });
+      const preview = await bot.api.sendMessage(chatId, previewText(p), { ...html, reply_markup: previewButtons });
+      if (pending.get(chatId) !== p) return void deleteQuietly(chatId, preview.message_id); // replaced meanwhile
+      p.previewId = preview.message_id;
+      log("preview", { parts: parts.length, chars: length, source: combineOrigins(parts.map((x) => x.origin)).source });
     } catch (err) {
       log("error", { where: "preview", error: describe(err) });
+      if (p && pending.get(chatId) === p && !p.previewId) {
+        takePending(chatId); // no preview means no Seal button: don't keep the letter
+        await bot.api.sendMessage(chatId, "Something went wrong showing the preview. Please forward the letter again.").catch(() => {});
+      }
     }
   }
 
   const pm = bot.chatType("private");
 
-  pm.command("start", (ctx) =>
-    ctx.reply(`${T.intro(cfg.unlockMs)}\n\n${T.consent(cfg.unlockMs)}`, { ...html, reply_markup: agreeButton }));
+  pm.command("start", (ctx) => sealingClosed()
+    ? ctx.reply(closedMessage())
+    : ctx.reply(`${T.intro(cfg.unlockMs)}\n\n${T.consent(cfg.unlockMs)}`, { ...html, reply_markup: agreeButton }));
 
   pm.callbackQuery("consent", async (ctx) => {
     store.addConsent(ownerOf(ctx));
     log("consent");
-    await ctx.answerCallbackQuery("Thank you");
+    await ctx.answerCallbackQuery("Thank you").catch(() => {});
     await ctx.editMessageReplyMarkup().catch(() => {});
     await ctx.reply(T.promptMessage(), html);
   });
@@ -119,8 +168,11 @@ export function createBot(
     const rows = store.listMine(ownerOf(ctx));
     if (!rows.length) return ctx.reply("You have no capsules yet. Forward your agent's letter to seal one.");
     const line = (c: Capsule) =>
-      `• <b>${KIND_LABEL[c.kind]}</b>, sealed ${dateIST(Date.parse(c.sealed_at))}, opens ${dateTimeIST(Date.parse(c.unlock_at))}\n${link(c.id)}\n<code>/burn ${c.id}</code>`;
-    await ctx.reply(`Your capsules (keep these links private):\n\n${rows.map(line).join("\n\n")}`, html);
+      `• <b>${capsuleLabel(c)}</b>, sealed ${dateIST(Date.parse(c.sealed_at))}, opens ${dateTimeIST(Date.parse(c.unlock_at))}\n${link(c.id)}\n<code>/burn ${c.id}</code>`;
+    for (let i = 0; i < rows.length; i += MINE_PAGE) {
+      const page = rows.slice(i, i + MINE_PAGE).map(line).join("\n\n");
+      await ctx.reply(i === 0 ? `Your capsules (keep these links private):\n\n${page}` : page, html);
+    }
   });
 
   pm.command("burn", async (ctx) => {
@@ -133,8 +185,9 @@ export function createBot(
 
   pm.command("village", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply(T.help(), html);
+    const dropped = await discardLetter(ctx.chat.id); // otherwise ODIN's verse would join that letter
     villageNext.add(ctx.chat.id);
-    await ctx.reply("Forward ODIN's letter now. It will be sealed as ODIN's letter to the village.");
+    await ctx.reply(`${dropped ? "I discarded the letter in progress. " : ""}Forward ODIN's letter now. It will be sealed as ODIN's letter to the village.`);
   });
 
   pm.command("demo_seed", async (ctx) => {
@@ -151,95 +204,175 @@ export function createBot(
 
   pm.on("message", async (ctx) => {
     const msg = ctx.message;
+    const chatId = ctx.chat.id;
     const text = msg.text ?? msg.caption ?? "";
-    if (!msg.forward_origin && text.startsWith("/")) return ctx.reply(T.help(), html);
+    const forwarded = Boolean(msg.forward_origin);
+    if (!forwarded && text.startsWith("/")) return ctx.reply(T.help(), html);
+    if (sealingClosed()) return ctx.reply(closedMessage());
     if (!store.hasConsent(ownerOf(ctx))) {
       return ctx.reply(`Before I seal anything, please read this and tap I agree. Then forward the letter again.\n\n${T.consent(cfg.unlockMs)}`, { ...html, reply_markup: agreeButton });
     }
-    if (!text.trim()) return ctx.reply("I can only seal text. Forward your agent's text reply.");
+    if (!text.trim()) {
+      // An album arrives as one message per photo, and only the captioned one carries text.
+      if (msg.media_group_id) {
+        const letter = collecting.get(chatId);
+        if (letter) return void letter.albumIds.push(msg.message_id);
+        if (albumNoticed.get(chatId) === msg.media_group_id) return;
+        albumNoticed.set(chatId, msg.media_group_id);
+      }
+      return ctx.reply("I can only seal text. Forward your agent's text reply.");
+    }
 
-    const chatId = ctx.chat.id;
-    const part: Part = { messageId: msg.message_id, text, origin: classifyOrigin(msg) };
-    if (collecting.has(chatId)) {
-      windows.add(chatId, part);
+    const part: Part = { messageId: msg.message_id, text, origin: classifyOrigin(msg), forwarded };
+    const collected = windows.peek(chatId);
+    if (collected) {
+      // Forwarding the same part twice must not double the letter.
+      if (!collected.some((x) => x.text.trim() === text.trim())) windows.add(chatId, part);
       return;
     }
-    // A part that arrives after the preview reopens the letter instead of starting a new one.
-    const earlier = takePending(chatId);
-    if (earlier) await ctx.api.deleteMessage(chatId, earlier.previewId).catch(() => {});
-    const kind: Kind = earlier?.kind ?? (villageNext.delete(chatId) ? "village" : "resident");
-    if (overLimit(ownerOf(ctx))) return ctx.reply(limitMessage);
+    let replaced = false;
+    if (pending.has(chatId)) {
+      if (!forwarded) return ctx.reply("Tap Seal or Cancel on the preview above first.");
+      replaced = await discardLetter(chatId); // a new forward starts a new letter
+    }
+    if (overLimit(ctx)) return ctx.reply(limitMessage);
 
-    const info: { kind: Kind; ackId?: number } = { kind };
-    collecting.set(chatId, info);
-    for (const p of [...(earlier?.parts ?? []), part]) windows.add(chatId, p);
-    log("collecting", { message_id: msg.message_id, kind });
+    const letter: Letter = { kind: forwarded && villageNext.delete(chatId) ? "village" : "resident", albumIds: [] };
+    collecting.set(chatId, letter);
+    windows.add(chatId, part);
+    log("collecting", { message_id: msg.message_id, kind: letter.kind });
     const ack = await ctx.reply(
-      `Got it. I'll wait ${Math.round((opts.mergeWindowMs ?? MERGE_WINDOW_MS) / 1000)} seconds in case the reply came in several parts. Forward any other parts now.`,
+      `${replaced ? "That starts a new letter, so I discarded the previous preview. " : "Got it. "}I'll wait ${Math.round(windowMs / 1000)} seconds in case the reply came in several parts. Forward any other parts now.`,
       { reply_markup: new InlineKeyboard().text("That's everything", "flush") },
     );
-    info.ackId = ack.message_id;
+    if (collecting.get(chatId) === letter) letter.ackId = ack.message_id;
+    else await deleteQuietly(chatId, ack.message_id); // the window already closed
+  });
+
+  // Fixing a typo in a typed letter updates the letter and its preview.
+  pm.on("edited_message", async (ctx) => {
+    const msg = ctx.editedMessage;
+    const chatId = ctx.chat.id;
+    const text = msg.text ?? msg.caption ?? "";
+    const p = pending.get(chatId);
+    const part = [...(windows.peek(chatId) ?? []), ...(p?.parts ?? [])].find((x) => x.messageId === msg.message_id);
+    if (!part || !text.trim()) return;
+    part.text = text;
+    log("part_edited", { message_id: msg.message_id });
+    if (p?.previewId && p.parts.includes(part)) {
+      await ctx.api.editMessageText(chatId, p.previewId, previewText(p), { ...html, reply_markup: previewButtons }).catch(() => {});
+    }
   });
 
   pm.callbackQuery("flush", async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await windows.close(ctx.chat.id);
+    const chatId = ctx.chat.id;
+    await ctx.answerCallbackQuery().catch(() => {});
+    const letter = collecting.get(chatId);
+    if (letter && windows.isOpen(chatId)) {
+      if (letter.ackId === undefined || letter.ackId === ctx.callbackQuery.message?.message_id) return windows.close(chatId);
+      return;
+    }
+    if (pending.has(chatId)) return; // a second tap: the preview is already here
+    await ctx.deleteMessage().catch(() => {});
+    await ctx.reply("Nothing is waiting any more, probably because I restarted. Please forward the letter again.");
   });
 
+  /** The chat's pending letter, but only if the tapped button belongs to its own preview. */
+  function tapped(ctx: Context) {
+    const p = pending.get(ctx.chat!.id);
+    return p && p.previewId === ctx.callbackQuery?.message?.message_id ? p : undefined;
+  }
+
   pm.callbackQuery("cancel", async (ctx) => {
-    const p = takePending(ctx.chat.id);
-    await ctx.answerCallbackQuery(p ? "Cancelled" : "Nothing to cancel");
+    const p = tapped(ctx);
+    if (p) takePending(ctx.chat.id);
+    await ctx.answerCallbackQuery(p ? "Cancelled" : "This preview is no longer active").catch(() => {});
     await ctx.deleteMessage().catch(() => {});
-    if (p) {
-      log("cancelled", { parts: p.parts.length });
-      await ctx.reply("Cancelled. Nothing was stored. Forward a letter whenever you're ready.");
-    }
+    if (!p) return;
+    log("cancelled", { parts: p.parts.length });
+    await ctx.reply("Cancelled. Nothing was stored. Forward a letter whenever you're ready.");
   });
 
   pm.callbackQuery("seal", async (ctx) => {
     const chatId = ctx.chat.id;
-    const p = takePending(chatId);
-    if (!p) return ctx.answerCallbackQuery({ text: "This preview expired. Forward the letter again.", show_alert: true });
-    const ownerHash = ownerOf(ctx);
-    if (overLimit(ownerHash)) {
-      await ctx.answerCallbackQuery();
+    const answer = (text?: string, show_alert = false) =>
+      ctx.answerCallbackQuery(text ? { text, show_alert } : undefined).catch(() => {});
+    const p = tapped(ctx);
+    if (!p) {
+      await answer("This preview is no longer active. Forward the letter again.", true);
+      return ctx.deleteMessage().catch(() => {}); // an old preview still shows the start of a letter
+    }
+    if (sealingClosed()) {
+      await discardLetter(chatId);
+      await answer();
+      return ctx.reply(closedMessage());
+    }
+    if (overLimit(ctx)) {
+      await answer();
       return ctx.reply(limitMessage);
     }
-    await ctx.answerCallbackQuery("Sealing…");
+    const text = mergeText(p.parts);
+    if (text.length > MAX_CHARS) { // an edit can make it longer after the preview
+      await answer();
+      return ctx.reply(tooLong(text.length));
+    }
+    takePending(chatId);
+    await answer("Sealing…");
 
     const origin = combineOrigins(p.parts.map((x) => x.origin));
-    const partIds = p.parts.map((x) => x.messageId);
     let capsule;
     try {
       capsule = await sealCapsule(store, {
-        text: mergeText(p.parts),
+        text,
         kind: p.kind,
         round: cfg.round,
-        ownerHash,
+        ownerHash: ownerOf(ctx),
         agentHash: origin.agentUsername ? saltedHash(cfg.hashSalt, "agent", origin.agentUsername) : null,
         source: origin.source,
       });
-    } finally {
-      p.parts.length = 0; // the plaintext is gone from here on, sealed or not
+    } catch (err) {
+      log("error", { where: "seal", error: describe(err) });
+      hold(chatId, p); // keep the letter, so Seal can be tapped again
+      return ctx.reply("Sorry, sealing failed and nothing was stored. Tap Seal to try again, or Cancel.");
     }
-    log("sealed", { kind: p.kind, parts: partIds.length, source: origin.source });
+    const forwardedIds = p.parts.filter((x) => x.forwarded).map((x) => x.messageId);
+    const typed = p.parts.length - forwardedIds.length;
+    p.parts.length = 0; // the plaintext is gone from here on
+    log("sealed", { kind: p.kind, parts: forwardedIds.length + typed, source: origin.source });
 
-    await ctx.api.deleteMessages(chatId, [...partIds, p.previewId]).catch((err) =>
-      log("error", { where: "delete_messages", error: describe(err) }));
+    // Only forwarded messages are deleted: what the resident typed here may be their only copy.
+    const cleaned = await ctx.api.deleteMessages(chatId, [...forwardedIds, ...p.albumIds, p.previewId!]).then(
+      () => true,
+      (err) => {
+        log("error", { where: "delete_messages", error: describe(err) });
+        return false;
+      },
+    );
+    const from = origin.source === "agent" ? "your agent's chat" : "the chat you forwarded it from";
+    const cleanup = !cleaned
+      ? "I couldn't delete the messages from this chat, so you may want to delete them yourself."
+      : typed === 0
+        ? `I deleted the forwarded messages and the preview from this chat. The original still exists in ${from}.`
+        : `I deleted ${forwardedIds.length ? "the forwarded messages and " : ""}the preview from this chat. What you typed is still here, so delete it if you like.`;
     const url = link(capsule.id);
-    await ctx.reply([
-      `<b>Sealed</b> ✉️ ${p.kind === "village" ? "ODIN's letter to the village is" : "Your letter is"} locked until ${dateTimeIST(cfg.unlockMs)} (drand round #${capsule.round}).`,
-      "I deleted the forwarded messages and the preview from this chat. The original still exists in your agent's chat.",
-      "",
-      "Your capsule link. Keep it private: after the unlock date, anyone holding it can open the letter.",
-      url,
-    ].join("\n"), html);
-    await ctx.replyWithDocument(new InputFile(Buffer.from(capsule.ciphertext, "utf8"), `dear-me-${capsule.id}.age`), {
-      caption: `The capsule file. It opens after the unlock date at ${cfg.publicBaseUrl}/open, or with drand's tle tool, even if our server is gone.`,
-    });
-    await ctx.replyWithDocument(new InputFile(Buffer.from(calendarFile({ url, startMs: cfg.unlockMs }), "utf8"), "dear-me-opens.ics"), {
-      caption: `A calendar reminder for ${dateTimeIST(cfg.unlockMs)}.`,
-    });
+    try {
+      await ctx.reply([
+        `<b>Sealed</b> ✉️ ${p.kind === "village" ? "ODIN's letter to the village is" : "Your letter is"} locked until ${dateTimeIST(cfg.unlockMs)} (drand round #${capsule.round}).`,
+        cleanup,
+        "",
+        "Your capsule link. Keep it private: after the unlock date, anyone holding it can open the letter.",
+        url,
+      ].join("\n"), html);
+      await ctx.replyWithDocument(new InputFile(Buffer.from(capsule.ciphertext, "utf8"), `dear-me-${capsule.id}.age`), {
+        caption: `The capsule file. It opens after the unlock date at ${cfg.publicBaseUrl}/open, or with drand's tle tool, even if our server is gone.`,
+      });
+      await ctx.replyWithDocument(new InputFile(Buffer.from(calendarFile({ url, startMs: cfg.unlockMs }), "utf8"), "dear-me-opens.ics"), {
+        caption: `A calendar reminder for ${dateTimeIST(cfg.unlockMs)}.`,
+      });
+    } catch (err) {
+      log("error", { where: "send_capsule", error: describe(err) });
+      await ctx.reply("Your letter is sealed, but sending its link and files failed. Send /mine to get the link.").catch(() => {});
+    }
   });
 
   // No group chats.

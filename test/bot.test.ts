@@ -12,7 +12,7 @@ import { loadConfig } from "../src/config.ts";
 import { openStore } from "../src/db.ts";
 import { saltedHash } from "../src/hash.ts";
 import { inspectCapsule } from "../src/lock.ts";
-import { stdoutLog } from "../src/log.ts";
+import { stdoutLog, type Log } from "../src/log.ts";
 
 const PARTS = [
   "Dear Asha, three weeks ago you arrived in Mandrem saying you wanted to finish the novel about your grandmother's tea estate.",
@@ -33,11 +33,11 @@ const BOT_INFO = {
 
 type Call = { method: string; payload: Record<string, any>; result: unknown };
 
-function harness(log = stdoutLog) {
+function harness({ log = stdoutLog as Log, admin = true, env = {} as Record<string, string> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dear-me-test-"));
   const cfg = loadConfig({
-    TELEGRAM_BOT_TOKEN: "123:TEST", HASH_SALT: "test-salt", DB_PATH: join(dir, "test.db"),
-    PUBLIC_BASE_URL: "https://dear-me.test", ADMIN_TG_IDS: String(USER.id),
+    TELEGRAM_BOT_TOKEN: "123:TEST", HASH_SALT: "test-salt-for-the-bot", DB_PATH: join(dir, "test.db"),
+    PUBLIC_BASE_URL: "https://dear-me.test", ADMIN_TG_IDS: admin ? String(USER.id) : "", ...env,
   });
   const store = openStore(cfg.dbPath);
   const bot = createBot(cfg, store, log, { botInfo: BOT_INFO });
@@ -48,6 +48,11 @@ function harness(log = stdoutLog) {
     calls.push({ method, payload: payload as Record<string, any>, result });
     return { ok: true, result } as never;
   });
+  /** The id of the newest bot message carrying a button with this callback data. */
+  const withButton = (data: string) => {
+    const call = [...calls].reverse().find((c) => c.method === "sendMessage" && JSON.stringify(c.payload.reply_markup ?? {}).includes(`"callback_data":"${data}"`));
+    return (call?.result as { message_id: number } | undefined)?.message_id ?? 1;
+  };
 
   let updateId = 0;
   let messageId = 0;
@@ -56,17 +61,25 @@ function harness(log = stdoutLog) {
     messageId++;
     return feed({ message: { message_id: messageId, date: 1_700_000_000, chat: CHAT, from: USER, ...fields } });
   };
+  const fromAgent = { forward_origin: { type: "user", date: 1_700_000_000, sender_user: AGENT } };
   return {
     cfg, store, calls, dir,
     owner: saltedHash(cfg.hashSalt, "owner", USER.id),
     lastMessageId: () => messageId,
+    previewId: () => withButton("seal"),
     command: (text: string) => message({ text, entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0].length }] }),
     typed: (text: string) => message({ text }),
     forward: (text: string, sender = AGENT) =>
       message({ text, forward_origin: { type: "user", date: 1_700_000_000, sender_user: sender } }),
-    press: (data: string) =>
-      feed({ callback_query: { id: `cb${updateId}`, from: USER, chat_instance: "1", data, message: { message_id: 1, date: 0, chat: CHAT } } }),
+    album: (group: string, caption?: string) =>
+      message({ media_group_id: group, photo: [{ file_id: "p", file_unique_id: "p", width: 1, height: 1 }], ...(caption ? { caption } : {}), ...fromAgent }),
+    edit: (id: number, text: string) =>
+      feed({ edited_message: { message_id: id, date: 1_700_000_000, edit_date: 1_700_000_100, chat: CHAT, from: USER, text } }),
+    /** Taps a button on the newest bot message that has it (the preview, the acknowledgement…). */
+    press: (data: string, onMessage = withButton(data)) =>
+      feed({ callback_query: { id: `cb${updateId}`, from: USER, chat_instance: "1", data, message: { message_id: onMessage, date: 0, chat: CHAT } } }),
     sent: () => calls.filter((c) => c.method === "sendMessage").map((c) => c.payload.text as string),
+    answers: () => calls.filter((c) => c.method === "answerCallbackQuery").map((c) => c.payload.text as string | undefined),
   };
 }
 
@@ -131,8 +144,9 @@ test("a full session seals the letter, cleans up the chat, and persists no plain
     assert.ok(ics.replace(/\r\n /g, "").includes(`https://dear-me.test/c/${capsule.id}`));
 
     // Pressing Seal again finds nothing: the plaintext is gone from memory.
-    await h.press("seal");
-    assert.equal(h.calls.at(-1)!.payload.text, "This preview expired. Forward the letter again.");
+    await h.press("seal", previewId);
+    assert.equal(h.answers().at(-1), "This preview is no longer active. Forward the letter again.");
+    assert.equal(h.store.listMine(h.owner).length, 1);
 
     // No 20-character piece of the letter in the database files or in anything printed.
     const files = ["test.db", "test.db-wal", "test.db-shm"].map((f) => join(h.dir, f)).filter(existsSync);
@@ -149,16 +163,19 @@ test("a full session seals the letter, cleans up the chat, and persists no plain
   }
 });
 
+
+const quiet = { log: () => {} };
+
 test("before consent nothing is collected", async () => {
-  const h = harness(() => {});
+  const h = harness(quiet);
   await h.forward(PARTS[0]);
   assert.match(h.sent().at(-1)!, /please read this and tap I agree/);
   assert.equal(h.calls.some((c) => c.payload.text?.includes("wait 90 seconds")), false);
   h.store.close();
 });
 
-test("a typed letter is labelled as written by the resident, and Cancel stores nothing", async () => {
-  const h = harness(() => {});
+test("a typed letter is labelled as the resident's, and Cancel stores nothing", async () => {
+  const h = harness(quiet);
   await agree(h);
   await h.typed("Dear me, a note I wrote myself.");
   await h.press("flush");
@@ -169,8 +186,23 @@ test("a typed letter is labelled as written by the resident, and Cancel stores n
   h.store.close();
 });
 
+test("a typed letter is sealed but left in the chat, and the reply says so", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.typed("Dear me, a note I wrote myself.");
+  await h.press("flush");
+  const previewId = h.previewId();
+  await h.press("seal");
+  assert.equal(h.store.listMine(h.owner)[0].source, "resident");
+  assert.deepEqual(h.calls.find((c) => c.method === "deleteMessages")!.payload.message_ids, [previewId]);
+  const sealed = h.sent().find((t) => t.startsWith("<b>Sealed</b>"))!;
+  assert.match(sealed, /What you typed is still here/);
+  assert.doesNotMatch(sealed, /agent's chat/);
+  h.store.close();
+});
+
 test("letters over 4,000 characters are refused", async () => {
-  const h = harness(() => {});
+  const h = harness(quiet);
   await agree(h);
   await h.forward("x".repeat(MAX_CHARS - 10));
   await h.forward("y".repeat(20));
@@ -181,32 +213,142 @@ test("letters over 4,000 characters are refused", async () => {
   h.store.close();
 });
 
-test("at most 3 letters per day; demo capsules don't count", async () => {
-  const h = harness(() => {});
+test("the same part forwarded twice is counted once", async () => {
+  const h = harness(quiet);
   await agree(h);
-  await h.command("/demo_seed");
-  assert.match(h.sent().at(-1)!, /Created 4 demo capsules/);
+  await h.forward(PARTS[0]);
+  await h.forward(PARTS[0]);
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /1 part · Written by an agent/);
+  h.store.close();
+});
+
+test("after a preview, typed text is not merged and a new forward starts a new letter", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.forward("Letter A from the agent.");
+  await h.press("flush");
+  const previewA = h.previewId();
+  await h.typed("ok seal it");
+  assert.equal(h.sent().at(-1), "Tap Seal or Cancel on the preview above first.");
+
+  await h.forward("Letter B from the agent.");
+  assert.match(h.sent().at(-1)!, /^That starts a new letter, so I discarded the previous preview\./);
+  assert.ok(h.calls.some((c) => c.method === "deleteMessage" && c.payload.message_id === previewA), "old preview removed");
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /1 part · Written by an agent/);
+
+  // A's old Seal button must not seal B.
+  await h.press("seal", previewA);
+  assert.equal(h.answers().at(-1), "This preview is no longer active. Forward the letter again.");
+  assert.equal(h.store.listMine(h.owner).length, 0);
+  await h.press("seal");
+  const [capsule] = h.store.listMine(h.owner);
+  assert.equal(capsule.source, "agent");
+  h.store.close();
+});
+
+test("if sealing fails, nothing is stored and Seal can be tapped again", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.forward("Dear Asha, a letter.");
+  await h.press("flush");
+  const insert = h.store.insertCapsule;
+  h.store.insertCapsule = () => {
+    throw new Error("database or disk is full");
+  };
+  await h.press("seal");
+  assert.match(h.sent().at(-1)!, /sealing failed and nothing was stored/);
+  assert.equal(h.calls.some((c) => c.method === "deleteMessages"), false, "nothing deleted after a failure");
+  h.store.insertCapsule = insert;
+  await h.press("seal");
+  assert.equal(h.store.listMine(h.owner).length, 1);
+  h.store.close();
+});
+
+test("editing a typed part updates the letter and its preview", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.typed("We swam at the beech.");
+  const id = h.lastMessageId();
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /21 characters/);
+  await h.edit(id, "We swam at the beach, Asha.");
+  const edited = h.calls.find((c) => c.method === "editMessageText")!;
+  assert.equal(edited.payload.message_id, h.previewId());
+  assert.match(edited.payload.text, /beach, Asha\./);
+  assert.match(edited.payload.text, /27 characters/);
+  h.store.close();
+});
+
+test("an album's extra photos are collected quietly and deleted on Seal", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.album("g1", "Dear Asha, the letter is the caption.");
+  const ids = [h.lastMessageId()];
+  await h.album("g1");
+  ids.push(h.lastMessageId());
+  await h.album("g1");
+  ids.push(h.lastMessageId());
+  assert.equal(h.sent().filter((t) => t.includes("I can only seal text")).length, 0);
+  await h.press("flush");
+  const previewId = h.previewId();
+  await h.press("seal");
+  assert.deepEqual(h.calls.find((c) => c.method === "deleteMessages")!.payload.message_ids, [...ids, previewId]);
+  h.store.close();
+});
+
+test("residents may seal 3 letters a day; burned and demo capsules don't count, admins are exempt", async () => {
+  const h = harness({ ...quiet, admin: false });
+  await agree(h);
   for (let i = 0; i < 3; i++) {
     await h.forward(`Letter number ${i}`);
     await h.press("flush");
     await h.press("seal");
   }
-  assert.equal(h.store.listMine(h.owner).filter((c) => c.kind === "resident").length, 3);
   await h.forward("Letter number 4");
   assert.match(h.sent().at(-1)!, /which is the limit/);
+  await h.command(`/burn ${h.store.listMine(h.owner)[0].id}`);
+  await h.forward("Letter number 5");
+  assert.match(h.sent().at(-1)!, /I'll wait 90 seconds/);
   h.store.close();
+
+  const admin = harness(quiet);
+  await agree(admin);
+  await admin.command("/demo_seed");
+  assert.match(admin.sent().at(-1)!, /Created 4 demo capsules/);
+  for (let i = 0; i < 4; i++) {
+    await admin.forward(`Letter number ${i}`);
+    await admin.press("flush");
+    await admin.press("seal");
+  }
+  assert.equal(admin.store.listMine(admin.owner).filter((c) => c.kind === "resident").length, 4);
+  admin.store.close();
 });
 
-test("/village seals the next letter as ODIN's, and /burn deletes our copy", async () => {
-  const h = harness(() => {});
+test("/village drops the letter in progress; only the next forward becomes ODIN's; /burn deletes our copy", async () => {
+  const h = harness(quiet);
   await agree(h);
+  await h.forward("The admin's own letter.");
+  await h.press("flush");
   await h.command("/village");
+  assert.match(h.sent().at(-1)!, /^I discarded the letter in progress\. Forward ODIN's letter now/);
+
+  await h.typed("A note typed in between.");
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /^<b>Preview<\/b>/, "a typed note does not use up /village");
+  await h.press("cancel");
+
   await h.forward("To the village, in verse.");
   await h.press("flush");
-  assert.match(h.sent().at(-1)!, /ODIN's letter to the village/);
+  assert.match(h.sent().at(-1)!, /^<b>ODIN's letter to the village<\/b>/);
   await h.press("seal");
   const [odin] = h.store.listMine(h.owner);
   assert.equal(odin.kind, "village");
+
+  await h.forward("The admin's next letter.");
+  await h.press("flush");
+  assert.match(h.sent().at(-1)!, /^<b>Preview<\/b>/, "the flag is used up");
 
   await h.command("/mine");
   assert.ok(h.sent().at(-1)!.includes(`https://dear-me.test/c/${odin.id}`));
@@ -214,5 +356,36 @@ test("/village seals the next letter as ODIN's, and /burn deletes our copy", asy
   assert.match(h.sent().at(-1)!, /Deleted our copy/);
   assert.equal(h.store.listMine(h.owner).length, 0);
   assert.equal(h.store.getCapsule(odin.id)?.ciphertext, "");
+  h.store.close();
+});
+
+test("/mine sends long lists in pages", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  for (let i = 0; i < 3; i++) await h.command("/demo_seed");
+  const before = h.sent().length;
+  await h.command("/mine");
+  const pages = h.sent().slice(before);
+  assert.equal(pages.length, 2);
+  assert.ok(pages.every((p) => p.length < 4096));
+  assert.equal(pages.join("\n").match(/\/burn /g)?.length, 12);
+  h.store.close();
+});
+
+test("'That's everything' with nothing waiting (after a restart) says so", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.press("flush", 4242);
+  assert.match(h.sent().at(-1)!, /Nothing is waiting any more/);
+  h.store.close();
+});
+
+test("after the unlock time the bot stops sealing", async () => {
+  const h = harness({ ...quiet, env: { UNLOCK_AT: "2025-01-01T00:00:00Z" } });
+  await h.command("/start");
+  assert.match(h.sent().at(-1)!, /^Sealing closed/);
+  await h.forward("A letter for a year that has passed.");
+  assert.match(h.sent().at(-1)!, /^Sealing closed/);
+  assert.equal(h.store.listMine(h.owner).length, 0);
   h.store.close();
 });

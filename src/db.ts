@@ -53,7 +53,7 @@ export function openStore(path: string) {
     get: db.prepare(`SELECT * FROM capsules WHERE id = ?`),
     mine: db.prepare(`SELECT * FROM capsules WHERE owner_hash = ? AND burned = 0 ORDER BY sealed_at DESC`),
     burn: db.prepare(`UPDATE capsules SET burned = 1, ciphertext = '' WHERE id = ? AND owner_hash = ? AND burned = 0`),
-    sealedSince: db.prepare(`SELECT COUNT(*) AS n FROM capsules WHERE owner_hash = ? AND kind != 'demo' AND sealed_at >= ?`),
+    sealedSince: db.prepare(`SELECT COUNT(*) AS n FROM capsules WHERE owner_hash = ? AND kind != 'demo' AND burned = 0 AND sealed_at >= ?`),
     wall: db.prepare(`SELECT id, kind, sealed_at, unlock_at FROM capsules WHERE burned = 0 ORDER BY sealed_at DESC, rowid DESC`),
     // One agent per (resident, agent bot) pair, so a bot that serves many residents still counts once per resident.
     agents: db.prepare(`SELECT COUNT(DISTINCT owner_hash || ':' || agent_hash) AS n FROM capsules

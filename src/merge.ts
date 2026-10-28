@@ -3,6 +3,13 @@
 
 export const MERGE_WINDOW_MS = 90_000;
 
+/** A timer that doesn't keep the process alive by itself; the bot's polling does that. */
+export function backgroundTimer(fn: () => void, ms: number) {
+  const timer = setTimeout(fn, ms);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return timer;
+}
+
 export function createMergeWindow<T extends { messageId: number }>(
   windowMs: number,
   onClose: (chatId: number, parts: T[]) => void | Promise<void>,
@@ -25,7 +32,7 @@ export function createMergeWindow<T extends { messageId: number }>(
         w.parts.push(part);
         return false;
       }
-      open.set(chatId, { parts: [part], timer: setTimeout(() => close(chatId), windowMs) });
+      open.set(chatId, { parts: [part], timer: backgroundTimer(() => close(chatId), windowMs) });
       return true;
     },
     /** Close the window early ("That's everything"). */
@@ -37,6 +44,8 @@ export function createMergeWindow<T extends { messageId: number }>(
       open.delete(chatId);
     },
     isOpen: (chatId: number) => open.has(chatId),
+    /** The parts collected so far, if a window is open. */
+    peek: (chatId: number): T[] | undefined => open.get(chatId)?.parts,
   };
 }
 
