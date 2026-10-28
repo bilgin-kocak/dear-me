@@ -1,4 +1,4 @@
-import { CHAIN, inspectCapsule } from "../src/lock.ts";
+import { CHAIN, canonicalCapsule, inspectCapsule } from "../src/lock.ts";
 import { showCapsule } from "./opener.ts";
 import { $ } from "./ui.ts";
 
@@ -10,19 +10,23 @@ $("#pick").onclick = () => file.click();
 file.onchange = async () => {
   const f = file.files?.[0];
   if (!f) return;
-  area.value = await f.text();
+  // Bytes, not text: a binary age file (tle's default) would be mangled by UTF-8 decoding.
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  area.value = canonicalCapsule(bytes) ?? new TextDecoder().decode(bytes);
+  file.value = ""; // choosing the same file again still fires change
   go(f.name);
 };
 $("#go").onclick = () => go();
 
 function go(fileName = "capsule.age") {
-  const armored = area.value.trim();
-  const info = inspectCapsule(armored);
   const problem = $("#problem");
   problem.hidden = true;
   dispose?.();
+  dispose = undefined;
   $("#capsule").replaceChildren();
-  if (!info) {
+  const armored = canonicalCapsule(area.value);
+  const info = armored && inspectCapsule(armored);
+  if (!armored || !info) {
     problem.textContent = "That isn't a tlock capsule. Paste the whole file, from the BEGIN line to the END line.";
     problem.hidden = false;
     return;

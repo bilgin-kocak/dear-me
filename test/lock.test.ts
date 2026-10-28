@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { defaultChainInfo, roundAt, roundTime } from "tlock-js";
 import { loadConfig } from "../src/config.ts";
-import { CHAIN, inspectCapsule, roundForUnlock, seal, timeOfRound } from "../src/lock.ts";
+import { CHAIN, canonicalCapsule, inspectCapsule, roundForUnlock, seal, timeOfRound } from "../src/lock.ts";
 
 const UNLOCK = "2027-10-31T20:00:00+05:30";
 
@@ -31,4 +31,18 @@ test("sealing works offline and the capsule names its round and chain", async ()
   assert.match(armored, /^-----BEGIN AGE ENCRYPTED FILE-----/);
   assert.deepEqual(inspectCapsule(armored), { round: 44063212, chainHash: CHAIN.hash });
   assert.equal(inspectCapsule("not a capsule"), null);
+});
+
+test("a capsule pasted with stray text, indentation or CRLF, or uploaded as binary age, is rebuilt exactly", async () => {
+  const armored = await seal("hello", 44063212);
+  assert.equal(canonicalCapsule(armored), armored);
+  assert.equal(canonicalCapsule(armored.replace(/\n/g, "\r\n")), armored);
+  const indented = armored.trim().split("\n").map((line) => `    ${line}`).join("\n");
+  assert.equal(canonicalCapsule(`Here is my capsule:\n\n${indented}\n\nSent from my phone`), armored);
+  const body = armored.replace(/-----(BEGIN|END) AGE ENCRYPTED FILE-----/g, "").replace(/\s+/g, "");
+  const binary = new Uint8Array(Buffer.from(body, "base64"));
+  assert.equal(Buffer.from(binary.subarray(0, 21)).toString("latin1"), "age-encryption.org/v1");
+  assert.equal(canonicalCapsule(binary), armored);
+  assert.equal(canonicalCapsule("not a capsule"), null);
+  assert.equal(canonicalCapsule("-----BEGIN AGE ENCRYPTED FILE-----\n!!!\n-----END AGE ENCRYPTED FILE-----"), null);
 });

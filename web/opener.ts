@@ -1,12 +1,20 @@
 // Opening a capsule in the browser: the "too early" attempt, waiting for the
 // round, and the capsule view shared by /c/:id and /open.
-import { CHAIN, RELAYS, beaconUrl, open, quicknet, timeOfRound } from "../src/lock.ts";
-import { $, countdown, download, fmtIST, reducedMotion, sleep, typewriter } from "./ui.ts";
+import { CHAIN, RELAYS, beaconUrl, isTooEarly, open, quicknet, timeOfRound } from "../src/lock.ts";
+import { $, countdown, download, fmtIST, reducedMotion, revealInView, showErrors, sleep, typewriter } from "./ui.ts";
+
+/** AbortSignal.timeout() arrived in Safari 16; iOS 15 phones need the fallback. */
+function timeoutSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ms);
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+const get = (url: string) => fetch(url, { cache: "no-store", signal: timeoutSignal(5000) });
 
 export async function latestRound(): Promise<number | undefined> {
   try {
-    const res = await fetch(`${RELAYS[0]}/${CHAIN.hash}/public/latest`, { cache: "no-store", signal: AbortSignal.timeout(5000) });
-    return (await res.json()).round;
+    return (await (await get(`${RELAYS[0]}/${CHAIN.hash}/public/latest`)).json()).round;
   } catch {
     return undefined;
   }
@@ -21,21 +29,27 @@ export async function tryOpenNow(armored: string, round: number): Promise<{ text
     return { text: await open(armored) };
   } catch (err) {
     const errors = [`tlock-js: ${(err as Error).message}`];
-    try {
-      const [res, latest] = await Promise.all([
-        fetch(beaconUrl(round), { cache: "no-store", signal: AbortSignal.timeout(5000) }),
-        latestRound(),
-      ]);
-      const status = res.status === 425 ? "425 Too Early" : `${res.status}`;
-      errors.push(`drand: GET /public/${round} → ${status}${latest ? `. Latest published round: #${latest}` : ""}`);
-    } catch {
-      // Offline: the tlock error says enough.
+    // drand answers 425 Too Early for rounds well ahead. For the next round or two it
+    // holds the request or answers 500 instead, which would only confuse the audience.
+    if (isTooEarly(err) && timeOfRound(round) - Date.now() > 6000) {
+      try {
+        const [res, latest] = await Promise.all([get(beaconUrl(round)), latestRound()]);
+        if (res.status === 425) errors.push(`drand: GET /public/${round} → 425 Too Early${latest ? `. Latest published round: #${latest}` : ""}`);
+      } catch {
+        // Offline: the tlock error says enough.
+      }
     }
     return { errors };
   }
 }
 
-/** Waits for the round's time, then polls drand every second and opens as soon as the beacon exists. */
+/** Retrying helps while the key isn't out yet or a relay hiccups. A damaged capsule fails for good. */
+const transient = (err: unknown) => isTooEarly(err) || /fetch|network|Error response/i.test(String((err as Error)?.message));
+
+/**
+ * Waits for the round's time, then polls drand every second and opens the capsule as
+ * soon as the beacon exists. Throws if the capsule itself cannot be opened.
+ */
 export async function openWhenDue(
   armored: string,
   round: number,
@@ -45,13 +59,21 @@ export async function openWhenDue(
   await sleep(timeOfRound(round) - Date.now());
   let relay = 0;
   for (let attempt = 1; ; attempt++) {
-    signal?.throwIfAborted();
+    if (signal?.aborted) throw new Error("stopped");
+    let published = false;
     try {
-      const res = await fetch(beaconUrl(round, RELAYS[relay]), { cache: "no-store", signal: AbortSignal.timeout(5000) });
-      if (res.ok) return await open(armored, quicknet(RELAYS[relay]));
+      const res = await get(beaconUrl(round, RELAYS[relay]));
+      published = res.ok;
       if (res.status >= 500) relay = (relay + 1) % RELAYS.length;
     } catch {
       relay = (relay + 1) % RELAYS.length; // this relay is unreachable or slow: try the next one
+    }
+    if (published) {
+      try {
+        return await open(armored, quicknet(RELAYS[relay]));
+      } catch (err) {
+        if (!transient(err)) throw err;
+      }
     }
     onWaiting?.(attempt);
     await sleep(1000);
@@ -81,58 +103,66 @@ const CAPSULE_VIEW = `
 export function showCapsule(root: HTMLElement, c: { armored: string; round: number; title: string; label: string; fileName: string }) {
   root.innerHTML = CAPSULE_VIEW;
   const abort = new AbortController();
-  const el = (name: string) => $(`[data-${name}]`, root);
+  const live = () => !abort.signal.aborted;
+  // Look the elements up once: work left over from a disposed view then only touches its own detached nodes.
+  const el: Record<string, HTMLElement> = {};
+  for (const node of root.querySelectorAll<HTMLElement>("*")) {
+    for (const name of node.getAttributeNames()) if (name.startsWith("data-")) el[name.slice(5)] = node;
+  }
   const due = timeOfRound(c.round);
-  el("title").textContent = c.title;
-  el("label").textContent = c.label;
-  el("opens").textContent = fmtIST(due);
-  el("round").textContent = `#${c.round}`;
-  el("download").onclick = () => download(c.fileName, c.armored);
+  el.title.textContent = c.title;
+  el.label.textContent = c.label;
+  el.opens.textContent = fmtIST(due);
+  el.round.textContent = `#${c.round}`;
+  el.download.onclick = () => download(c.fileName, c.armored);
 
   let revealed = false;
   async function reveal(text: string) {
-    if (revealed) return;
+    if (revealed || !live()) return;
     revealed = true;
     stop();
-    el("errors").hidden = true;
-    el("status").hidden = true;
-    el("try").hidden = true;
-    el("countdown").hidden = true;
-    el("note").textContent = `The League of Entropy published the key for drand round #${c.round} on ${fmtIST(due)}.`;
-    el("env").classList.add("opened");
+    for (const name of ["errors", "status", "try", "countdown"]) el[name].hidden = true;
+    el.note.textContent = `The League of Entropy published the key for drand round #${c.round} on ${fmtIST(due)}.`;
+    el.env.classList.add("opened");
     await sleep(reducedMotion() ? 0 : 900);
-    const letter = el("letter");
-    letter.hidden = false;
-    await typewriter(letter, text);
-    const proof = el("proof");
-    proof.innerHTML = `Opened by drand round <a target="_blank" rel="noreferrer"></a>`;
-    const a = $("a", proof) as HTMLAnchorElement;
+    // Reserve the letter's full height and scroll to it: on a phone it opens below the fold.
+    // Nothing paints before typewriter() clears the text again.
+    el.letter.hidden = false;
+    el.letter.textContent = text;
+    el.letter.style.minHeight = `${el.letter.offsetHeight}px`;
+    revealInView(el.letter);
+    await typewriter(el.letter, text);
+    el.proof.innerHTML = `Opened by drand round <a target="_blank" rel="noreferrer"></a>`;
+    const a = $<HTMLAnchorElement>("a", el.proof);
     a.href = beaconUrl(c.round);
     a.textContent = `#${c.round}`;
-    proof.hidden = false;
+    el.proof.hidden = false;
   }
 
-  el("try").onclick = async () => {
-    const btn = el("try") as HTMLButtonElement;
+  el.try.onclick = async () => {
+    const btn = el.try as HTMLButtonElement;
     btn.disabled = true;
     const result = await tryOpenNow(c.armored, c.round);
     btn.disabled = false;
+    if (!live() || revealed) return; // the letter opened, or another capsule replaced this view, meanwhile
     if ("text" in result) return reveal(result.text);
-    const box = el("errors");
-    box.replaceChildren(...result.errors.map((line) => Object.assign(document.createElement("div"), { textContent: line })));
-    box.hidden = false;
-    box.classList.remove("shake");
-    void box.offsetWidth;
-    box.classList.add("shake");
+    showErrors(el.errors, result.errors);
   };
 
-  const stop = countdown(el("countdown"), due, async () => {
-    const status = el("status");
-    status.textContent = `Round #${c.round} is due. Fetching its key from drand…`;
-    status.hidden = false;
-    reveal(await openWhenDue(c.armored, c.round, (n) => {
-      status.textContent = `Waiting for drand to publish round #${c.round}… (${n})`;
-    }, abort.signal));
+  const stop = countdown(el.countdown, due, async () => {
+    if (!live()) return;
+    el.status.textContent = `Round #${c.round} is due. Fetching its key from drand…`;
+    el.status.hidden = false;
+    try {
+      const text = await openWhenDue(c.armored, c.round, (n) => {
+        if (live()) el.status.textContent = `Waiting for drand to publish round #${c.round}… (${n})`;
+      }, abort.signal);
+      await reveal(text);
+    } catch (err) {
+      if (!live() || revealed) return;
+      el.status.hidden = true;
+      showErrors(el.errors, [`This capsule can't be opened: ${(err as Error).message}`]);
+    }
   });
   return () => {
     stop();

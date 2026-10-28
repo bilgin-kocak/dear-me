@@ -9,12 +9,14 @@
 <style>
   .stage { max-width: 1200px; text-align: center; }
   .stage h1 { font-size: clamp(32px, 5vw, 64px); }
+  /* Sized by height too, so the error and the proof line stay on a 720p projector screen. */
+  .stage .env.big { --w: min(320px, 80vw, 26vh); }
   .stage textarea { max-width: 760px; min-height: 220px; display: block; margin: 0 auto; font: clamp(15px, 1.6vw, 18px)/1.55 var(--serif); }
   .label { display: block; margin: 24px 0 10px; color: var(--muted); }
-  .stage-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; margin-top: 24px; }
-  .big-count { font: 700 clamp(72px, 16vw, 220px)/1 var(--mono); font-variant-numeric: tabular-nums; margin: 8px 0; }
+  .stage-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; margin-top: 16px; }
+  .big-count { font: 700 clamp(56px, min(16vw, 20vh), 220px)/1 var(--mono); font-variant-numeric: tabular-nums; margin: 8px 0; }
   .cipher {
-    height: min(420px, 60vh);
+    height: min(420px, 55vh);
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 12px;
@@ -24,14 +26,14 @@
   }
   .cipher pre { margin: 0; padding: 18px; font: clamp(11px, 1.1vw, 15px)/1.5 var(--mono); color: #9fb3ff; text-align: left; white-space: pre-wrap; word-break: break-all; animation: scroll 24s linear infinite; }
   @keyframes scroll { to { transform: translateY(-50%); } }
-  #opened .letter { font-size: clamp(18px, 2.4vw, 26px); max-width: 860px; }
+  #opened .letter { font-size: clamp(16px, min(2.4vw, 2.9vh), 26px); max-width: 860px; margin-top: 16px; }
   #opened .proof { font-size: clamp(16px, 2vw, 22px); }
   @media (max-width: 800px) { .stage-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <main class="stage">
-  <p class="eyebrow">Stage mode · runs entirely in this browser · drand quicknet</p>
+  <p class="eyebrow"><span class="tag">Demo · sample letter</span> Stage mode · runs entirely in this browser · drand quicknet</p>
 
   <section id="compose">
     <h1>Seal a letter for 60 seconds</h1>

@@ -23,7 +23,9 @@ export const beaconUrl = (round: number, relay = RELAYS[0]) =>
  */
 export function quicknet(relay = RELAYS[0]): ChainClient {
   const chain = { baseUrl: `${relay}/${CHAIN.hash}`, info: async () => CHAIN };
-  return new HttpChainClient(chain, { disableBeaconVerification: false, noCache: true });
+  // Empty HTTP options: drand-client's default User-Agent header makes Firefox send a
+  // CORS preflight, which not every relay (drand.cloudflare.com) answers.
+  return new HttpChainClient(chain, { disableBeaconVerification: false, noCache: true }, {});
 }
 
 export const timeOfRound = (round: number) => roundTime(CHAIN, round);
@@ -47,18 +49,27 @@ export async function open(armored: string, client = quicknet()): Promise<string
 
 export const isTooEarly = (err: unknown) => /too early/i.test(String((err as Error)?.message));
 
-/** Like open(), but falls back to other drand relays if one is down. */
-export async function openAnywhere(armored: string): Promise<string> {
-  let lastErr: unknown;
-  for (const relay of RELAYS) {
-    try {
-      return await open(armored, quicknet(relay));
-    } catch (err) {
-      if (isTooEarly(err)) throw err;
-      lastErr = err;
-    }
+const BEGIN = "-----BEGIN AGE ENCRYPTED FILE-----";
+const END = "-----END AGE ENCRYPTED FILE-----";
+const AGE_MAGIC = "age-encryption.org/v1\n";
+const armor = (b64: string) => `${BEGIN}\n${(b64.match(/.{1,64}/g) ?? []).join("\n")}\n${END}\n`;
+
+/**
+ * The capsule exactly as tlock-js accepts it, rebuilt from what someone pasted or
+ * uploaded: armor with stray text around it, indented or re-wrapped lines, CRLF line
+ * ends, or a binary age file (what drand's tle writes by default). Null if it isn't one.
+ */
+export function canonicalCapsule(input: string | Uint8Array): string | null {
+  if (typeof input !== "string") {
+    const bytes = Buffer.from(input);
+    if (bytes.subarray(0, AGE_MAGIC.length).toString("latin1") === AGE_MAGIC) return armor(bytes.toString("base64"));
+    input = bytes.toString("utf8");
   }
-  throw lastErr;
+  const start = input.indexOf(BEGIN);
+  const end = input.indexOf(END, start + BEGIN.length);
+  if (start < 0 || end < 0) return null;
+  const b64 = input.slice(start + BEGIN.length, end).replace(/\s+/g, "");
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(b64) ? armor(b64) : null;
 }
 
 /** Reads the round and chain from an armored tlock capsule without decrypting it. */

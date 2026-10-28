@@ -61,3 +61,27 @@ export function download(name: string, text: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
+
+/** Scrolls just enough to show el: on a projector or a phone the newest line must be on screen. */
+export const bringIntoView = (el: HTMLElement) =>
+  el.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+
+/**
+ * Scrolls so the letter is in view at its full height, or from its top if it is taller
+ * than the screen. scrollIntoView would measure the unfold animation's squashed box.
+ */
+export function revealInView(el: HTMLElement) {
+  const top = el.getBoundingClientRect().top; // the unfold grows from the top edge, so this is exact
+  const overflow = top + el.offsetHeight - innerHeight + 16;
+  if (overflow > 0) scrollBy({ top: Math.min(overflow, top - 16), behavior: reducedMotion() ? "auto" : "smooth" });
+}
+
+/** Shows error lines in a box, shakes it and brings it into view. Always textContent. */
+export function showErrors(box: HTMLElement, lines: string[]) {
+  box.replaceChildren(...lines.map((line) => Object.assign(document.createElement("div"), { textContent: line })));
+  box.hidden = false;
+  box.classList.remove("shake");
+  void box.offsetWidth; // restart the animation
+  box.classList.add("shake");
+  bringIntoView(box);
+}

@@ -51,7 +51,7 @@ function render(w: Wall) {
   }
 
   const by = (kind: Kind) => w.capsules.filter((c) => c.kind === kind);
-  sync($("#real"), [...by("village").slice(0, 1), ...by("resident")]);
+  sync($("#real"), [...by("village"), ...by("resident")]);
   sync($("#demo"), by("demo"));
   $("#demoRow").hidden = w.demoCount === 0;
   $("#empty").hidden = w.realCount > 0;
@@ -59,21 +59,17 @@ function render(w: Wall) {
   firstRender = false;
 }
 
-/** Picks the largest envelope size that keeps the whole wall on one projector screen. */
+/** Picks the largest envelope size that keeps the whole wall on one projector screen, by measuring it. */
 function fit() {
   const grid = $("#real");
   if (innerWidth < 600) return grid.style.setProperty("--env", "72px"); // phones scroll instead
-  const cells = grid.children.length + (grid.querySelector(".village") ? 3 : 0);
-  const gap = parseFloat(getComputedStyle(grid).rowGap) || 24;
-  const below = ($("#demoRow").hidden ? 0 : $("#demoRow").offsetHeight + 48) + 80;
-  const height = Math.max(240, innerHeight - (grid.getBoundingClientRect().top + scrollY) - below);
+  const root = document.documentElement;
   let size = 220;
-  while (size > 44) {
-    const cols = Math.max(2, Math.floor((grid.clientWidth + gap) / (size + gap)));
-    if (Math.ceil(cells / cols) * (size * 5 / 7 + gap) <= height) break;
-    size -= 4;
-  }
   grid.style.setProperty("--env", `${size}px`);
+  while (size > 40 && root.scrollHeight > root.clientHeight) {
+    size -= 6;
+    grid.style.setProperty("--env", `${size}px`);
+  }
 }
 
 async function poll() {
