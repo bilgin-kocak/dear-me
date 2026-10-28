@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Stage demo</title>
+<!--CSS-->
+<style>
+  .stage { max-width: 1200px; text-align: center; }
+  .stage h1 { font-size: clamp(32px, 5vw, 64px); }
+  .stage textarea { max-width: 760px; min-height: 220px; display: block; margin: 0 auto; font: clamp(15px, 1.6vw, 18px)/1.55 var(--serif); }
+  .label { display: block; margin: 24px 0 10px; color: var(--muted); }
+  .stage-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; margin-top: 24px; }
+  .big-count { font: 700 clamp(72px, 16vw, 220px)/1 var(--mono); font-variant-numeric: tabular-nums; margin: 8px 0; }
+  .cipher {
+    height: min(420px, 60vh);
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--night-2);
+    -webkit-mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
+    mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
+  }
+  .cipher pre { margin: 0; padding: 18px; font: clamp(11px, 1.2vw, 15px)/1.5 var(--mono); color: #9fb3ff; text-align: left; animation: scroll 24s linear infinite; }
+  @keyframes scroll { to { transform: translateY(-50%); } }
+  #opened .letter { font-size: clamp(18px, 2.4vw, 26px); max-width: 860px; }
+  #opened .proof { font-size: clamp(16px, 2vw, 22px); }
+  @media (max-width: 800px) { .stage-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main class="stage">
+  <p class="eyebrow">Stage mode · runs entirely in this browser · drand quicknet</p>
+
+  <section id="compose">
+    <h1>Seal a letter for 60 seconds</h1>
+    <p class="muted">We lock it to a drand round whose key does not exist yet. Nobody can open it early, not even this page.</p>
+    <label class="label" for="text">Letter <span class="tag">sample</span></label>
+    <textarea id="text" spellcheck="false">Dear Priya,
+
+You came to Edge City India to find out whether the idea on your napkins is a company or a hobby. You told me you would ship a first version to ten people by December.
+
+The moment worth keeping: the sunrise swim when you finally said it out loud.
+
+Three questions for October 2027: Did you ship it? Who did you build it with? What would you tell the person who arrived in Mandrem?
+
+Juniper, your agent</textarea>
+    <div class="actions">
+      <button id="seal60">Seal for 60 seconds</button>
+      <button class="ghost" id="seal30">Seal for 30 seconds</button>
+    </div>
+  </section>
+
+  <section id="sealed" hidden>
+    <div class="stage-grid">
+      <div>
+        <div class="env big" id="env"><span class="seal"></span></div>
+        <div class="big-count" id="count">1:00</div>
+        <p class="muted" id="roundInfo"></p>
+        <div class="actions"><button id="try">Try to open now</button></div>
+        <div class="errors" id="errors" hidden></div>
+        <p class="status" id="status" hidden></p>
+      </div>
+      <div class="cipher" aria-label="The sealed letter, as ciphertext"><pre id="cipher"></pre></div>
+    </div>
+  </section>
+
+  <section id="opened" hidden>
+    <article class="letter" id="letter"></article>
+    <p class="proof" id="proof"></p>
+    <div class="actions"><button class="ghost" id="again">Run again</button></div>
+  </section>
+</main>
+<!--JS-->
+</body>
+</html>

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Open a capsule</title>
+<!--CSS-->
+</head>
+<body>
+<main class="narrow">
+  <p class="eyebrow">Dear Me, From Your Agent</p>
+  <h1>Open a capsule</h1>
+  <p class="muted">
+    Paste a <code>.age</code> capsule or choose the file. Everything happens in this browser, and the page talks only to the
+    public drand network, so a saved copy of it keeps working without our server.
+  </p>
+  <textarea id="armored" spellcheck="false" placeholder="-----BEGIN AGE ENCRYPTED FILE-----"></textarea>
+  <input type="file" id="file" accept=".age,text/plain" hidden>
+  <div class="actions">
+    <button class="ghost" id="pick">Choose .age file</button>
+    <button id="go">Open</button>
+  </div>
+  <div class="errors" id="problem" hidden></div>
+  <div id="capsule"></div>
+  <footer>
+    No browser? drand's command-line tool works too:
+    <code>tle --decrypt --chain 52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971 dear-me-….age</code>
+  </footer>
+</main>
+<!--JS-->
+</body>
+</html>
