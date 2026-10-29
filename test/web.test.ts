@@ -87,14 +87,30 @@ test("capsules the server must not keep are refused", async () => {
   assert.equal(store.wallRows().length, 0);
 });
 
-test("sealing is rate limited per address and in total", async () => {
+test("sealing is rate limited per address and in total, counting only new capsules", async () => {
   const { post } = setup({}, { perIp: 2, total: 3 });
+  const fresh = async () => ({ ciphertext: await seal(LETTER, 44063212) });
+  for (let i = 0; i < 5; i++) assert.equal((await post({ ciphertext: "junk" }, "198.51.100.1")).status, 400);
+  const first = await fresh();
+  assert.equal((await post(first, "198.51.100.1")).status, 201, "junk didn't use up the address's quota");
+  assert.equal((await post(await fresh(), "198.51.100.1")).status, 201);
+  assert.equal((await post(await fresh(), "198.51.100.1")).status, 429, "per address");
+  assert.equal((await post(first, "198.51.100.1")).status, 200, "a retry of a stored capsule is not a new seal");
+  assert.equal((await post(await fresh(), "198.51.100.2")).status, 201);
+  assert.equal((await post(await fresh(), "198.51.100.3")).status, 429, "in total");
+});
+
+test("a retry after a lost answer gets the capsule already stored, not a second copy", async () => {
+  const { app, post } = setup();
   const armored = await seal(LETTER, 44063212);
-  assert.equal((await post({ ciphertext: armored }, "198.51.100.1")).status, 201);
-  assert.equal((await post({ ciphertext: armored }, "198.51.100.1")).status, 201);
-  assert.equal((await post({ ciphertext: armored }, "198.51.100.1")).status, 429, "per address");
-  assert.equal((await post({ ciphertext: armored }, "198.51.100.2")).status, 201);
-  assert.equal((await post({ ciphertext: armored }, "198.51.100.3")).status, 429, "in total");
+  const first = await post({ ciphertext: armored });
+  const retry = await post({ ciphertext: armored.replace(/\n/g, "\r\n") }); // the same capsule, re-wrapped
+  assert.equal(first.status, 201);
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).id, (await first.json()).id);
+  const wall = await (await app.request("/api/wall")).json();
+  assert.equal(wall.realCount, 1);
+  assert.equal(wall.uniqueAgents, 1);
 });
 
 test("after the unlock time nothing more is sealed", async () => {
@@ -105,7 +121,9 @@ test("after the unlock time nothing more is sealed", async () => {
 test("a link capsule's link deletes our copy; a bot capsule can't be deleted from the web", async () => {
   const { app, post, store, cfg } = setup();
   const { id } = await (await post({ ciphertext: await seal(LETTER, 44063212) })).json();
-  assert.equal((await app.request(`/api/c/${id}`, { method: "DELETE" })).status, 204);
+  // Holding the link is what owns it, whatever the salt is now.
+  const resalted = createWeb(loadConfig({ HASH_SALT: "a-different-salt-after-a-restart" }), store);
+  assert.equal((await resalted.request(`/api/c/${id}`, { method: "DELETE" })).status, 204);
   assert.equal((await app.request(`/api/c/${id}`)).status, 410);
   assert.equal(store.getCapsule(id)!.ciphertext, "");
   assert.equal((await app.request(`/api/c/${id}`, { method: "DELETE" })).status, 404, "already deleted");

@@ -39,11 +39,12 @@ export function createWeb(
   // A village shares one Wi-Fi address, so the per-address limit is generous.
   opts: { pagesDir?: string; log?: Log; limits?: { perIp: number; total: number } } = {},
 ) {
-  const { pagesDir = "dist/web", log = () => {}, limits = { perIp: 30, total: 600 } } = opts;
+  const { pagesDir = "dist/web", log = () => {}, limits = { perIp: 200, total: 600 } } = opts;
   const app = new Hono();
   const allowSeal = hourlyLimit(limits.perIp, limits.total);
   const unlockAt = new Date(cfg.unlockMs).toISOString();
   // A capsule sealed from a seal link has no Telegram owner: whoever holds its link owns it.
+  // The owner hash only fills the column; deleting goes by the id (store.burnLink).
   const linkOwner = (id: string) => saltedHash(cfg.hashSalt, "owner", `link:${id}`);
 
   app.use("*", async (c, next) => {
@@ -117,7 +118,6 @@ export function createWeb(
   app.post("/api/capsules", bodyLimit({ maxSize: 32 * 1024, onError: (c) => c.json({ error: "too_large" }, 413) }), async (c) => {
     c.header("Cache-Control", "no-store");
     if (Date.now() >= cfg.unlockMs) return c.json({ error: "sealing_closed" }, 410);
-    if (!allowSeal(clientIp(c))) return c.json({ error: "rate_limited" }, 429);
     const body = await c.req.json().catch(() => null);
     const armored = typeof body?.ciphertext === "string" ? canonicalCapsule(body.ciphertext) : null;
     const info = armored ? inspectCapsule(armored) : null;
@@ -126,6 +126,13 @@ export function createWeb(
     if (!armored || armored.length > 20_000 || info?.chainHash !== CHAIN.hash || info.round !== cfg.round) {
       return c.json({ error: "invalid_capsule" }, 400);
     }
+    const answer = (id: string, status: 200 | 201) =>
+      c.json({ id, url: `${cfg.publicBaseUrl}/c/${id}`, round: cfg.round, unlockAt }, status);
+    // A retry after a lost answer sends the same capsule again: answer with the one already stored.
+    // tlock ciphertexts are random, so two seals never match, and only the sealer holds this one.
+    const stored = store.findLinkCapsule(armored);
+    if (stored) return answer(stored, 200);
+    if (!allowSeal(clientIp(c))) return c.json({ error: "rate_limited" }, 429);
     const id = newCapsuleId();
     store.insertCapsule({
       id,
@@ -139,13 +146,12 @@ export function createWeb(
       source: "link",
     });
     log("sealed", { kind: "resident", source: "link" });
-    return c.json({ id, url: `${cfg.publicBaseUrl}/c/${id}`, round: cfg.round, unlockAt }, 201);
+    return answer(id, 201);
   });
 
   // Deletes our copy of a link-sealed capsule. Bot capsules are burned in the bot by their owner.
   app.delete("/api/c/:id", (c) => {
-    const id = c.req.param("id");
-    if (!store.burn(id, linkOwner(id))) return c.json({ error: "not_found" }, 404);
+    if (!store.burnLink(c.req.param("id"))) return c.json({ error: "not_found" }, 404);
     log("burned", { source: "link" });
     return c.body(null, 204);
   });

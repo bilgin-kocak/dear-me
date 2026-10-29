@@ -502,3 +502,26 @@ test("a seal link sent to the bot is not sealed: the resident is told to tap it"
   assert.equal(h.calls.some((c) => c.payload.text?.includes("wait 90 seconds")), false, "nothing was collected");
   h.store.close();
 });
+
+test("a letter that quotes the prompt's Python is still a letter", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.forward(`${LETTER}\n\nI couldn't run this, so here is the letter:\nprint("https://dear-me.test/seal#" + base64.b64encode(zlib.compress(letter.encode(), 9)).decode())`);
+  assert.match(h.sent().at(-1)!, /wait 90 seconds/);
+  h.store.close();
+});
+
+test("/burn deletes a capsule sealed from a seal link, given its link; /mine points to the seal page", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  await h.command("/mine");
+  assert.match(h.sent().at(-1)!, /no capsules sealed here yet.*https:\/\/dear-me\.test\/seal on the phone you used/);
+  const linked = await sealCapsule(h.store, { text: LETTER, kind: "resident", round: h.cfg.round, ownerHash: "someone-else", agentHash: null, source: "link" });
+  const other = await sealCapsule(h.store, { text: LETTER, kind: "resident", round: h.cfg.round, ownerHash: "someone-else", agentHash: null, source: "resident" });
+  await h.command(`/burn https://dear-me.test/c/${linked.id}`);
+  assert.match(h.sent().at(-1)!, /^Deleted our copy/);
+  assert.equal(h.store.getCapsule(linked.id)!.burned, 1);
+  await h.command(`/burn ${other.id}`);
+  assert.match(h.sent().at(-1)!, /can't find that capsule/, "another resident's bot capsule stays theirs");
+  h.store.close();
+});

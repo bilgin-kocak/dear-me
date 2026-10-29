@@ -3,7 +3,9 @@
 // own device, so the letter itself never reaches us. Runs in Node and in the browser.
 
 export const SEAL_PATH = "/seal";
-const MAX_BYTES = 64 * 1024; // far more than any letter we seal: a hostile link stops inflating here
+const MAX_BYTES = 64 * 1024; // far more than any letter we seal: a hostile link stops inflating soon after
+// A 4,000-character letter is at most 12,000 bytes, 16,000 characters of base64 even uncompressed.
+const MAX_BASE64 = 32_000;
 
 /**
  * The Python the agent runs, with `letter` already holding the letter. zlib makes the link
@@ -17,8 +19,12 @@ export const sealLinkPython = (origin: string) =>
 /** Runs bytes through a (de)compression stream. Null if they are damaged or grow past MAX_BYTES. */
 async function through(bytes: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array | null> {
   const writer = stream.writable.getWriter();
-  writer.write(bytes as Uint8Array<ArrayBuffer>).catch(() => {});
-  writer.close().catch(() => {});
+  // Small slices, each waiting for the reader: a zip bomb stops inflating soon after MAX_BYTES,
+  // instead of expanding in full in one go.
+  (async () => {
+    for (let i = 0; i < bytes.length; i += 4096) await writer.write(bytes.subarray(i, i + 4096) as Uint8Array<ArrayBuffer>);
+    await writer.close();
+  })().catch(() => {});
   const reader = stream.readable.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -67,9 +73,11 @@ export async function sealLink(origin: string, letter: string): Promise<string> 
 /**
  * The letter in a seal link's fragment, or null if it isn't a readable one. Accepts what
  * agents actually send: base64 or base64url, with or without padding, percent-encoded
- * characters, line breaks from wrapping, and plain UTF-8 that was never compressed.
+ * characters and line breaks from wrapping. Only zlib-compressed letters: zlib's checksum is
+ * what tells a damaged link from a letter, so a link without one is refused, not guessed at.
  */
 export async function readSealLink(fragment: string): Promise<string | null> {
+  if (fragment.length > 4 * MAX_BASE64) return null;
   let b64: string;
   try {
     b64 = decodeURIComponent(fragment.replace(/^#/, ""));
@@ -77,9 +85,8 @@ export async function readSealLink(fragment: string): Promise<string | null> {
     return null;
   }
   b64 = b64.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
-  if (!b64 || !/^[A-Za-z0-9+/]+$/.test(b64) || b64.length % 4 === 1) return null;
+  if (!b64 || b64.length > MAX_BASE64 || !/^[A-Za-z0-9+/]+$/.test(b64) || b64.length % 4 === 1) return null;
   const bytes = Uint8Array.from(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
-  // A damaged compressed link fails zlib's checksum, and its bytes are not text either.
-  const text = (isZlib(bytes) ? utf8(await through(bytes, new DecompressionStream("deflate"))) : null) ?? utf8(bytes);
-  return text?.trim() || null;
+  if (!isZlib(bytes)) return null;
+  return utf8(await through(bytes, new DecompressionStream("deflate")))?.trim() || null;
 }

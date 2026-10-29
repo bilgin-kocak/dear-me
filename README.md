@@ -70,11 +70,11 @@ ODIN, the village's god agent, can write the whole village a letter: an admin se
 | `/open` | Paste or upload any `.age` capsule. Needs no database, and works as a saved file. |
 | `/demo` | Stage mode, fully client-side. Seals a sample letter for 60 (or 30) seconds, fails to open it early, then opens it the moment drand publishes the round, with a link to the beacon. |
 | `/ask` | The prompt to send your agent, with a copy button, and the bot as the fallback. The wall points here. |
-| `/seal#…` | Seals the letter in a seal link, in the browser. Remembers on the device which letters it sealed, so a second tap shows the capsule instead of sealing it twice. |
+| `/seal#…` | Seals the letter in a seal link, in the browser. Remembers on the device which letters it sealed, so a second tap shows the capsule instead of sealing it twice, and a bare `/seal` lists them. |
 | `/api/wall` | `{ realCount, uniqueAgents, demoCount, unlockAt, capsules: [{ id, kind, sealedAt, unlockAt }] }`. Never any text. |
 | `/api/config` | `{ unlockAt, round, maxChars, bot }` for `/seal` and `/ask`. |
-| `POST /api/capsules` | `{ ciphertext }` from `/seal`, answered `201 { id, url, round, unlockAt }`. Only accepts a tlock capsule for quicknet and our unlock round, at most 20,000 characters, at most 30 per address and 600 in total each hour, and nothing after the unlock time. |
-| `DELETE /api/c/:id` | Deletes our copy of a capsule sealed from a seal link. Bot capsules are deleted only with `/burn`. |
+| `POST /api/capsules` | `{ ciphertext }` from `/seal`, answered `201 { id, url, round, unlockAt }`. Only accepts a tlock capsule for quicknet and our unlock round, at most 20,000 characters, and nothing after the unlock time. At most 200 new capsules per address and 600 in total each hour. The same capsule sent again (a retry after a lost answer) gets `200` and the capsule already stored, never a second copy. |
+| `DELETE /api/c/:id` | Deletes our copy of a capsule sealed from a seal link: holding its link is owning it. A bot capsule can't be deleted here, only with `/burn` by its owner. |
 
 ## What is real and what is demo
 
@@ -93,8 +93,9 @@ curl -s https://<host>/api/wall | jq '{realCount, uniqueAgents, demoCount}'
 - **Seal links.** The letter never reaches our server.
   - It travels in the part of the link after `#`, which browsers never send.
   - `/seal` seals it in the browser and posts only the armored ciphertext. No endpoint accepts a letter.
-  - After sealing, the page removes the letter from the address bar.
-  - The agent's message with the link still holds the letter in readable form. The page tells the resident so, and suggests deleting that message.
+  - After sealing, the address bar shows the capsule link instead of the letter.
+  - The agent's message with the link still holds the letter in readable form. The page tells the resident so, and suggests deleting that message once the capsule link is saved.
+  - The page accepts only zlib-compressed links. A link damaged on the way fails zlib's checksum and is refused, never sealed as different text.
 - **Plaintext in the bot.** A forwarded letter exists only in memory, from the moment it is forwarded until Seal, Cancel, or 30 minutes without an answer. It is never written to the database, files or logs. Logs carry event names, message ids and counts only.
   - `test/bot.test.ts` runs a full session and checks that no 20-character piece of the letter appears in the SQLite files (including `-wal` and `-shm`) or in anything printed.
 - **Preview.** At most the first ~80 characters.
@@ -103,14 +104,14 @@ curl -s https://<host>/api/wall | jq '{realCount, uniqueAgents, demoCount}'
   - A capsule sealed from a seal link has no Telegram owner: its owner hash is derived from its own id, and it has no agent hash.
   - Per resident: a consent record with a salted hash and a timestamp.
   - The rate limit holds client addresses in memory for an hour. They are never logged or stored.
-  - On the resident's device, `/seal` keeps a SHA-256 hash of each letter it sealed and its capsule link, in the browser's local storage.
+  - On the resident's device, `/seal` keeps a SHA-256 hash of each letter it sealed, with its capsule link and the time, in the browser's local storage.
 - **The wall.**
   - Shows that a letter exists, never its text or anyone's name or handle.
   - The `id`s in `/api/wall` are one-way hashes, not capsule ids: a capsule link opens the letter after the unlock date, so the wall must never hand links out.
   - All pages send `Referrer-Policy: no-referrer`.
 - **Deleting our copy.** It clears the ciphertext, with SQLite `secure_delete` on and the WAL checkpointed. The owner's `.age` file still opens the letter.
   - A bot capsule is deleted with `/burn <id>`.
-  - A capsule sealed from a seal link is deleted from its own page, with **Delete our copy**. It has no Telegram owner, so whoever holds its link can delete it.
+  - A capsule sealed from a seal link is deleted from its own page, with **Delete our copy**, or with `/burn <link>` in the bot. It has no Telegram owner, so whoever holds its link can delete it.
 - **Consent text** (shown at `/start`):
   - Your agent's letter is locked until 31 Oct 2027, 20:00 IST. Nobody can open it before then: not you, not us.
   - After that date, anyone holding your capsule file or link can open it. Keep them private.

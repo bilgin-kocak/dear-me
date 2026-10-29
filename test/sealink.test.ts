@@ -61,14 +61,11 @@ test("the JavaScript link reads back too", async () => {
 
 test("links come back the way apps and agents mangle them", async () => {
   const frag = fragmentOf(await sealLink(ORIGIN, LETTER));
-  const plain = new TextEncoder().encode(LETTER);
   const variants = {
     percentEncoded: encodeURIComponent(frag),
     base64url: frag.replace(/\+/g, "-").replace(/\//g, "_"),
     unpadded: frag.replace(/=+$/, ""),
     wrapped: frag.replace(/(.{64})/g, "$1\n"),
-    neverCompressed: b64(plain),
-    neverCompressedBase64url: Buffer.from(plain).toString("base64url"),
   };
   for (const [name, fragment] of Object.entries(variants)) assert.equal(await readSealLink(fragment), LETTER.trim(), name);
 });
@@ -89,6 +86,9 @@ test("a damaged link is refused, never read as gibberish", async () => {
     notText: b64(new Uint8Array([0xff, 0xfe, 0xfd, 0x80, 0x81, 0x82, 0x83])),
     onlySpaces: b64(new TextEncoder().encode("   \n  ")),
     zipBomb: b64(new Uint8Array(await bomb.arrayBuffer())),
+    // No checksum without zlib, so a copying mistake could not be told from the letter.
+    neverCompressed: b64(new TextEncoder().encode(LETTER)),
+    tooLong: frag.repeat(Math.ceil(40_000 / frag.length)).slice(0, 40_000),
   };
   for (const [name, fragment] of Object.entries(damaged)) assert.equal(await readSealLink(fragment), null, name);
 });

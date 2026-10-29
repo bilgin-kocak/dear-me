@@ -12,6 +12,9 @@ import { sealCapsule } from "./seal.ts";
 import { SEAL_PATH } from "./sealink.ts";
 import * as T from "./texts.ts";
 
+// A seal link with its payload. The prompt's Python, quoted in a letter, has `"` after the "#".
+const SEAL_LINK = new RegExp(`${SEAL_PATH}#[A-Za-z0-9+/=_%-]{16,}`);
+
 export const MAX_PER_DAY = 3;
 const PREVIEW_CHARS = 80;
 const PREVIEW_TTL_MS = 30 * 60_000; // an unanswered preview is forgotten after 30 minutes
@@ -192,7 +195,9 @@ export function createBot(
 
   pm.command("mine", async (ctx) => {
     const rows = store.listMine(ownerOf(ctx));
-    if (!rows.length) return ctx.reply("You have no capsules yet. Forward your agent's letter to seal one.");
+    if (!rows.length) {
+      return ctx.reply(`You have no capsules sealed here yet. Letters you sealed from a seal link are listed at ${cfg.publicBaseUrl}${SEAL_PATH} on the phone you used.`);
+    }
     const line = (c: Capsule) =>
       `• <b>${capsuleLabel(c)}</b>, sealed ${dateIST(Date.parse(c.sealed_at))}, opens ${dateTimeIST(Date.parse(c.unlock_at))}\n${link(c.id)}\n<code>/burn ${c.id}</code>`;
     for (let i = 0; i < rows.length; i += MINE_PAGE) {
@@ -204,7 +209,8 @@ export function createBot(
   pm.command("burn", async (ctx) => {
     const id = ctx.match.trim().split("/").pop() ?? "";
     if (!id) return ctx.reply("Send /burn followed by the capsule id. /mine lists them.");
-    if (!store.burn(id, ownerOf(ctx))) return ctx.reply("I can't find that capsule among yours. /mine lists them.");
+    // A capsule sealed from a seal link belongs to whoever holds its link, as on its page.
+    if (!store.burn(id, ownerOf(ctx)) && !store.burnLink(id)) return ctx.reply("I can't find that capsule among yours. /mine lists them.");
     log("burned");
     await ctx.reply(`Deleted our copy. Your .age file still opens the letter after ${dateTimeIST(cfg.unlockMs)} at ${cfg.publicBaseUrl}/open.`, html);
   });
@@ -236,7 +242,7 @@ export function createBot(
     if (!forwarded && text.startsWith("/")) return ctx.reply(T.help(), html);
     // A seal link holds the letter encoded: sealing it here would lock away gibberish.
     const urls = (msg.entities ?? msg.caption_entities ?? []).map((e) => (e.type === "text_link" ? e.url : ""));
-    if ([text, ...urls].some((s) => s.includes(`${SEAL_PATH}#`))) return ctx.reply(T.sealLinkHint());
+    if ([text, ...urls].some((s) => SEAL_LINK.test(s))) return ctx.reply(T.sealLinkHint());
     if (sealingClosed()) return ctx.reply(closedMessage());
     if (!store.hasConsent(ownerOf(ctx))) {
       return ctx.reply(`Before I seal anything, please read this and tap I agree. Then forward the letter again.\n\n${T.consent(cfg.unlockMs)}`, { ...html, reply_markup: agreeButton });

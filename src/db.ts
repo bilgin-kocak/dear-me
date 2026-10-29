@@ -54,6 +54,8 @@ export function openStore(path: string) {
     get: db.prepare(`SELECT * FROM capsules WHERE id = ?`),
     mine: db.prepare(`SELECT * FROM capsules WHERE owner_hash = ? AND burned = 0 ORDER BY sealed_at DESC`),
     burn: db.prepare(`UPDATE capsules SET burned = 1, ciphertext = '' WHERE id = ? AND owner_hash = ? AND burned = 0`),
+    burnLink: db.prepare(`UPDATE capsules SET burned = 1, ciphertext = '' WHERE id = ? AND source = 'link' AND burned = 0`),
+    linkByCiphertext: db.prepare(`SELECT id FROM capsules WHERE source = 'link' AND burned = 0 AND ciphertext = ?`),
     sealedSince: db.prepare(`SELECT COUNT(*) AS n FROM capsules WHERE owner_hash = ? AND kind != 'demo' AND burned = 0 AND sealed_at >= ?`),
     wall: db.prepare(`SELECT id, kind, sealed_at, unlock_at FROM capsules WHERE burned = 0 ORDER BY sealed_at DESC, rowid DESC`),
     // One agent per (resident, agent bot) pair, so a bot that serves many residents still counts once per
@@ -67,15 +69,20 @@ export function openStore(path: string) {
     hasConsent: db.prepare(`SELECT 1 FROM consents WHERE owner_hash = ?`),
   };
 
+  const checkpointIf = (changed: boolean) => {
+    if (changed) db.pragma("wal_checkpoint(TRUNCATE)"); // don't leave the old row in the WAL either
+    return changed;
+  };
+
   return {
     insertCapsule: (c: Omit<Capsule, "burned">) => void q.insert.run(c),
     getCapsule: (id: string) => q.get.get(id) as Capsule | undefined,
     listMine: (ownerHash: string) => q.mine.all(ownerHash) as Capsule[],
-    burn(id: string, ownerHash: string): boolean {
-      const changed = q.burn.run(id, ownerHash).changes > 0;
-      if (changed) db.pragma("wal_checkpoint(TRUNCATE)"); // don't leave the old row in the WAL either
-      return changed;
-    },
+    burn: (id: string, ownerHash: string) => checkpointIf(q.burn.run(id, ownerHash).changes > 0),
+    /** A capsule sealed from a seal link has no Telegram owner: whoever holds its link owns it. */
+    burnLink: (id: string) => checkpointIf(q.burnLink.run(id).changes > 0),
+    /** The live link capsule with exactly this ciphertext, if one was stored already. */
+    findLinkCapsule: (ciphertext: string) => (q.linkByCiphertext.get(ciphertext) as { id: string } | undefined)?.id,
     sealedSince: (ownerHash: string, sinceIso: string) => (q.sealedSince.get(ownerHash, sinceIso) as { n: number }).n,
     wallRows: () => q.wall.all() as Pick<Capsule, "id" | "kind" | "sealed_at" | "unlock_at">[],
     uniqueAgents: () => (q.agents.get() as { n: number }).n,

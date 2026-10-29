@@ -54,15 +54,18 @@ function offerDelete(dispose: () => void) {
     }
     btn.disabled = true;
     const res = await fetch(`/api/c/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined);
+    // A 404 is a delete that already happened (its answer got lost) only if the capsule is gone.
+    const gone = res?.status === 204 || (res?.status === 404 && [404, 410].includes(
+      (await fetch(`/api/c/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => undefined))?.status ?? 0));
     btn.disabled = false;
-    if (res && (res.status === 204 || res.status === 404)) {
+    if (gone) {
       dispose();
       manage.hidden = true;
       return notice("Our copy is deleted", "This link no longer opens anything.");
     }
     armedUntil = 0;
     btn.textContent = "Delete our copy";
-    hint.textContent = "Our server isn't answering. Try again in a moment.";
+    hint.textContent = res ? "We couldn't delete our copy. Try again in a moment." : "Our server isn't answering. Try again in a moment.";
   };
 }
 

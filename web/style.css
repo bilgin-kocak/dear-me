@@ -194,6 +194,9 @@ textarea {
 .linkbox a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 14px var(--mono); text-align: left; }
 .linkbox button { padding: 10px 14px; font-size: 14px; }
 .manage { margin-top: 8px; }
+.capsules { list-style: none; padding: 0; margin: 20px auto; max-width: 560px; text-align: left; }
+.capsules li { margin: 8px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--night-2); color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.capsules a { font-family: var(--mono); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

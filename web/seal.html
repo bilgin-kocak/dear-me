@@ -24,6 +24,13 @@
     </div>
   </section>
 
+  <section id="mine" hidden>
+    <h1>Letters sealed on this device</h1>
+    <p class="muted" id="mineNote" hidden>They open on <strong class="date"></strong>. Keep these links private.</p>
+    <ul class="capsules" id="capsules"></ul>
+    <p class="muted small">To seal another letter, tap the link your agent sends you. <a href="/ask">How to get one</a></p>
+  </section>
+
   <section id="ready" hidden>
     <h1>Your agent wrote you a letter</h1>
     <p class="muted" id="about"></p>
@@ -48,7 +55,7 @@
   </section>
 
   <section id="done" hidden>
-    <h1 id="doneTitle">Sealed</h1>
+    <h1 id="doneTitle" tabindex="-1">Sealed</h1>
     <p>Opens <strong class="date"></strong></p>
     <p class="muted">Nobody can open it before then: not you, not us. Your envelope is on the <a href="/wall">wall</a> now.</p>
     <div class="linkbox"><a id="capsuleLink"></a><button class="ghost" id="copy">Copy link</button></div>
@@ -57,7 +64,8 @@
       <button id="ics">Add to calendar</button>
       <button class="ghost" id="age">Download .age file</button>
     </div>
-    <p class="muted small">Your agent's message with the seal link still holds the letter, readable by anyone who sees it. Delete that message if you want the letter to stay a secret until it opens.</p>
+    <p class="muted small" id="remembered" hidden>This browser also remembers the link: open <a href="/seal">/seal</a> on this device.</p>
+    <p class="muted small">Your agent's message with the seal link still holds the letter, readable by anyone who sees it. Once you've saved the capsule link (copied it, added it to your calendar or downloaded the file), you can delete that message.</p>
   </section>
 
   <footer>

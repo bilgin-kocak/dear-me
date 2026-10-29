@@ -2,12 +2,12 @@
 import { calendarFile } from "../src/ics.ts";
 import { seal } from "../src/lock.ts";
 import { readSealLink } from "../src/sealink.ts";
-import { $, copyText, download, fmtIST, revealInView, showErrors, sleep } from "./ui.ts";
+import { $, copyText, download, fmtDate, fmtIST, reducedMotion, revealInView, showErrors, sleep } from "./ui.ts";
 
 type Config = { unlockAt: string; round: number; maxChars: number };
-type Sealed = { id: string; url: string };
+type Sealed = { id: string; url: string; sealedAt?: string };
 
-const VIEWS = ["loading", "problem", "ready", "done"] as const;
+const VIEWS = ["loading", "problem", "mine", "ready", "done"] as const;
 const show = (view: (typeof VIEWS)[number]) => VIEWS.forEach((v) => ($(`#${v}`).hidden = v !== view));
 const setDates = (ms: number) => document.querySelectorAll(".date").forEach((el) => (el.textContent = fmtIST(ms)));
 
@@ -41,11 +41,13 @@ async function loadConfig(): Promise<Config | null> {
 }
 
 // This browser remembers the letters it sealed, so tapping the same link again shows the
-// capsule instead of sealing a second copy. It keeps a hash of the letter, never the letter.
+// capsule instead of sealing a second copy, and a bare /seal lists their links. It keeps a
+// hash of the letter, never the letter.
+const MEMORY = "dear-me:sealed:";
 async function memoryKey(letter: string) {
   try {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(letter)));
-    return `dear-me:sealed:${Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+    return MEMORY + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
   } catch {
     return null; // no Web Crypto outside HTTPS: then it doesn't remember
   }
@@ -62,12 +64,47 @@ async function stillThere(id: string) {
   const res = await fetch(`/api/c/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => undefined);
   return !(res && (res.status === 404 || res.status === 410));
 }
-function remember(key: string | null, sealed: Sealed) {
+function remember(key: string | null, sealed: Sealed): boolean {
   try {
-    if (key) localStorage.setItem(key, JSON.stringify(sealed));
+    if (!key) return false;
+    localStorage.setItem(key, JSON.stringify(sealed));
+    return true;
   } catch {
-    // private mode or storage blocked: nothing to remember with
+    return false; // private mode or storage blocked: nothing to remember with
   }
+}
+function rememberedCapsules(): Sealed[] {
+  try {
+    return Object.keys(localStorage)
+      .filter((k) => k.startsWith(MEMORY))
+      .map((k) => JSON.parse(localStorage.getItem(k) ?? "null") as Sealed | null)
+      .filter((s): s is Sealed => typeof s?.id === "string" && typeof s.url === "string")
+      .sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""));
+  } catch {
+    return [];
+  }
+}
+
+/** A bare /seal: the capsules this device sealed and that still exist, newest first. */
+async function showMine(): Promise<boolean> {
+  const checked = await Promise.all(rememberedCapsules().map(async (s) => ((await stillThere(s.id)) ? s : null)));
+  const live = checked.filter((s): s is Sealed => s !== null);
+  if (!live.length) return false;
+  $("#capsules").replaceChildren(...live.map((s) => {
+    const li = document.createElement("li");
+    const a = Object.assign(document.createElement("a"), { href: s.url, textContent: s.url.replace(/^https?:\/\//, "") });
+    li.append(a);
+    if (s.sealedAt) li.append(` · sealed ${fmtDate(Date.parse(s.sealedAt))}`);
+    return li;
+  }));
+  $("#env").classList.remove("opened");
+  show("mine");
+  const res = await fetch("/api/config", { cache: "no-store" }).catch(() => undefined);
+  if (res?.ok) {
+    setDates(Date.parse((await res.json()).unlockAt));
+    $("#mineNote").hidden = false;
+  }
+  return true;
 }
 
 function ready(letter: string, cfg: Config, unlockMs: number, key: string | null) {
@@ -82,6 +119,7 @@ function ready(letter: string, cfg: Config, unlockMs: number, key: string | null
     const el = $("#letter");
     el.textContent = letter; // a letter is never HTML
     el.hidden = false;
+    sealBtn.focus({ preventScroll: true }); // the focused button is about to go
     readBtn.hidden = true;
     sealBtn.textContent = "Seal it";
     revealInView(el);
@@ -101,10 +139,11 @@ function ready(letter: string, cfg: Config, unlockMs: number, key: string | null
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ciphertext: armored }),
       });
-      if (res.status === 201) {
+      if (res.ok) {
+        // 201 for a new capsule, 200 when a retry finds the one stored before its answer got lost.
         const { id, url }: Sealed = await res.json();
-        remember(key, { id, url });
-        return done({ id, url }, unlockMs, armored);
+        const kept = remember(key, { id, url, sealedAt: new Date().toISOString() });
+        return done({ id, url }, unlockMs, armored, false, kept);
       }
       reason = REFUSED[res.status] ?? `Our server answered ${res.status}. Try again in a moment.`;
     } catch {
@@ -121,9 +160,12 @@ function ready(letter: string, cfg: Config, unlockMs: number, key: string | null
   };
 }
 
-function done(sealed: Sealed, unlockMs: number, armored?: string, again = false) {
-  history.replaceState(null, "", location.pathname); // the letter leaves the address bar
+function done(sealed: Sealed, unlockMs: number, armored?: string, again = false, kept = again) {
+  // The letter leaves the address bar, and the capsule's link takes its place: a reload, a
+  // restored tab or Back then lands on the capsule, not on an empty seal page.
+  history.replaceState(null, "", new URL(sealed.url).pathname);
   $("#env").classList.remove("opened");
+  $("#remembered").hidden = !kept;
   $("#doneTitle").textContent = again ? "You already sealed this letter" : "Sealed";
   const link = $<HTMLAnchorElement>("#capsuleLink");
   link.href = sealed.url;
@@ -138,6 +180,9 @@ function done(sealed: Sealed, unlockMs: number, armored?: string, again = false)
   $("#age").hidden = !armored;
   if (armored) $("#age").onclick = () => download(`dear-me-${sealed.id}.age`, armored);
   show("done");
+  // The done view is shorter than the one the Seal button was in: start it from the top.
+  scrollTo({ top: 0, behavior: reducedMotion() ? "auto" : "smooth" });
+  $("#doneTitle").focus({ preventScroll: true });
 }
 
 async function start(letter: string) {
@@ -167,7 +212,9 @@ const letter = fragment && !oldBrowser ? await readSealLink(fragment) : null;
 if (oldBrowser) {
   problem("This browser is too old for seal links", "Open the link in an up-to-date browser, like Safari 16.4 or later, or Chrome.");
 } else if (!fragment) {
-  problem("No letter in this link", "This page seals a letter from a seal link, which your agent makes. The letter travels after the # in the link, and this link has nothing there.");
+  if (!(await showMine())) {
+    problem("No letter in this link", "This page seals a letter from a seal link, which your agent makes. The letter travels after the # in the link, and this link has nothing there.");
+  }
 } else if (!letter) {
   problem("This link is damaged", "Part of the letter got lost or changed on the way, so it can't be read. Ask your agent to send the link again, exactly as its code printed it.");
 } else {
