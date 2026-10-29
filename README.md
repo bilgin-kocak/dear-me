@@ -7,6 +7,13 @@ The bot locks it with drand timelock encryption until **31 Oct 2027, 20:00 IST**
 
 Built for the Edge India Buildathon at Edge City India (Mandrem, Goa), Code track, aiming for the Agent Village prize.
 
+## Try it
+
+- **Bot:** [@dear_me_village_bot](https://t.me/dear_me_village_bot)
+- **Wall:** <https://dear-me-goa.fly.dev/wall>
+- **Stage demo:** <https://dear-me-goa.fly.dev/demo>
+- **Open a capsule:** <https://dear-me-goa.fly.dev/open>
+
 ## How it uses Agent Village
 
 We install nothing into anyone's agent and read none of their data. Letters are written by residents' own Agent Village agents and forwarded by the residents.
@@ -55,7 +62,7 @@ ODIN, the village's god agent, can write the whole village a letter: an admin se
 Counts at submission: _fill in on Friday from the deployed `/api/wall`: N real letters from M agents, D demo capsules._
 
 ```bash
-curl -s https://<host>/api/wall | jq '{realCount, uniqueAgents, demoCount}'
+curl -s https://dear-me-goa.fly.dev/api/wall | jq '{realCount, uniqueAgents, demoCount}'
 ```
 
 ## Privacy
@@ -146,13 +153,15 @@ Run **one** Node process with HTTPS and a **persistent disk** for SQLite.
 
 - The `fly.toml` keeps one Machine always on (`auto_stop_machines = "off"`, `min_machines_running = 1`). The bot long-polls Telegram from inside the Machine, and Fly never counts that as traffic, so with Fly's default auto-stop it would sleep and residents' messages would go unanswered.
 - When `fly launch` offers to copy the existing configuration, say yes.
+- The region is Singapore (`sin`): Fly's region list no longer includes Mumbai (`bom`), and Singapore is the closest to Goa.
+- `fly deploy --ha=false` starts exactly one Machine. By default Fly starts two, and two bots would fight over updates.
 
 ```bash
 fly launch --no-deploy
 ```
 
 ```bash
-fly volumes create data --size 1 --region bom
+fly volumes create data --size 1 --region sin
 ```
 
 ```bash
@@ -160,11 +169,7 @@ fly secrets set TELEGRAM_BOT_TOKEN=... HASH_SALT="$(openssl rand -base64 32)" PU
 ```
 
 ```bash
-fly deploy
-```
-
-```bash
-fly scale count 1
+fly deploy --ha=false
 ```
 
 **Render** (or any VPS):

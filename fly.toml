@@ -1,6 +1,6 @@
 # Fly.io settings. `fly launch` offers to copy this file: say yes, then pick your own app name.
-app = "dear-me"
-primary_region = "bom" # Mumbai, the closest region to Goa
+app = "dear-me-goa"
+primary_region = "sin" # Singapore, the closest region to Goa that Fly offers
 
 [env]
   PORT = "3000"
