@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Ask your agent for a letter</title>
+<!--CSS-->
+</head>
+<body>
+<main class="narrow">
+  <p class="eyebrow">Dear Me, From Your Agent</p>
+  <div class="env big"><span class="seal"></span></div>
+  <h1>A letter from your agent, for next year</h1>
+  <p class="muted">
+    Your Agent Village agent knew you for three weeks. Ask it to write you a letter, then lock it with drand timelock
+    encryption until <strong id="date">31 Oct 2027 · 20:00 IST</strong>. Nobody can open it before then: not you, not us.
+  </p>
+  <ol class="steps">
+    <li><strong>Copy the prompt</strong> below.</li>
+    <li><strong>Send it to your agent</strong> in your private chat.</li>
+    <li><strong>Tap the link</strong> your agent replies with, and seal the letter on your phone.</li>
+  </ol>
+  <div class="actions"><button id="copy">Copy the prompt</button></div>
+  <pre class="prompt" id="prompt"></pre>
+  <p class="muted small" id="fallback" hidden>
+    If your agent writes the letter itself instead of a link, forward its reply to <a id="bot"></a> on Telegram, and the bot seals it.
+  </p>
+  <footer>
+    The letter rides in the part of the link after the #, which browsers never send to any server. The seal page locks it
+    on your phone, so our server only ever receives the locked capsule.
+    · <a href="/wall">The wall</a> · <a href="/open">Open a .age file</a>
+  </footer>
+</main>
+<!--JS-->
+</body>
+</html>

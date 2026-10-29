@@ -83,6 +83,9 @@ async function poll() {
   }
 }
 
+// Where to get a letter, as residents would type it: dear-me.fly.dev/ask
+document.querySelectorAll(".ask").forEach((el) => (el.textContent = `${location.host}/ask`));
+
 poll();
 setInterval(poll, 10_000);
 addEventListener("resize", fit);

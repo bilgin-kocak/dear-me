@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { InputFile } from "grammy";
 import type { Update, UserFromGetMe } from "grammy/types";
-import { createBot, MAX_CHARS } from "../src/bot.ts";
-import { loadConfig } from "../src/config.ts";
+import { createBot } from "../src/bot.ts";
+import { loadConfig, MAX_CHARS } from "../src/config.ts";
 import { openStore } from "../src/db.ts";
 import { saltedHash } from "../src/hash.ts";
 import { inspectCapsule } from "../src/lock.ts";
 import { sealCapsule } from "../src/seal.ts";
+import { sealLink } from "../src/sealink.ts";
 import { stdoutLog, type Log } from "../src/log.ts";
 
 const PARTS = [
@@ -67,6 +68,7 @@ function harness({ log = stdoutLog as Log, admin = true, env = {} as Record<stri
     cfg, store, calls, dir,
     owner: saltedHash(cfg.hashSalt, "owner", USER.id),
     lastMessageId: () => messageId,
+    message,
     previewId: () => withButton("seal"),
     command: (text: string) => message({ text, entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0].length }] }),
     typed: (text: string) => message({ text }),
@@ -108,7 +110,8 @@ test("a full session seals the letter, cleans up the chat, and persists no plain
     assert.equal(h.store.hasConsent(h.owner), true);
     const prompt = h.sent().find((t) => t.startsWith("<pre>"))!;
     assert.ok(prompt.includes("This is a one-off writing task."));
-    assert.ok(prompt.includes("Send this to your Agent Village agent in your private chat. When it replies, forward the reply here."));
+    assert.ok(prompt.includes("Send this to your Agent Village agent in your private chat. It replies with a link"));
+    assert.ok(prompt.includes("https://dear-me.test/seal#"), "the prompt carries this site's seal link");
 
     const partIds: number[] = [];
     for (const part of PARTS) {
@@ -483,5 +486,19 @@ test("a second tap on 'That's everything' after a too-long letter stays quiet", 
   assert.match(h.sent().at(-1)!, /The limit is 4,000/);
   await h.press("flush", ackId);
   assert.match(h.sent().at(-1)!, /The limit is 4,000/, "no restart message");
+  h.store.close();
+});
+
+test("a seal link sent to the bot is not sealed: the resident is told to tap it", async () => {
+  const h = harness(quiet);
+  await agree(h);
+  const link = await sealLink(h.cfg.publicBaseUrl, LETTER);
+  await h.forward(link);
+  assert.match(h.sent().at(-1)!, /^That's a seal link\. Tap it/);
+  // The same link behind link text.
+  const text = "Seal your letter";
+  await h.message({ text, entities: [{ type: "text_link", offset: 0, length: text.length, url: link }], forward_origin: { type: "user", date: 1_700_000_000, sender_user: AGENT } });
+  assert.match(h.sent().at(-1)!, /^That's a seal link\. Tap it/);
+  assert.equal(h.calls.some((c) => c.payload.text?.includes("wait 90 seconds")), false, "nothing was collected");
   h.store.close();
 });

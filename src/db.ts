@@ -3,7 +3,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type Kind = "resident" | "village" | "demo";
-export type Source = "agent" | "unverified" | "resident";
+/** link: sealed in the resident's browser from their agent's seal link (see src/sealink.ts). */
+export type Source = "agent" | "unverified" | "resident" | "link";
 
 export type Capsule = {
   id: string;
@@ -55,9 +56,13 @@ export function openStore(path: string) {
     burn: db.prepare(`UPDATE capsules SET burned = 1, ciphertext = '' WHERE id = ? AND owner_hash = ? AND burned = 0`),
     sealedSince: db.prepare(`SELECT COUNT(*) AS n FROM capsules WHERE owner_hash = ? AND kind != 'demo' AND burned = 0 AND sealed_at >= ?`),
     wall: db.prepare(`SELECT id, kind, sealed_at, unlock_at FROM capsules WHERE burned = 0 ORDER BY sealed_at DESC, rowid DESC`),
-    // One agent per (resident, agent bot) pair, so a bot that serves many residents still counts once per resident.
-    agents: db.prepare(`SELECT COUNT(DISTINCT owner_hash || ':' || agent_hash) AS n FROM capsules
-      WHERE burned = 0 AND kind != 'demo' AND agent_hash IS NOT NULL`),
+    // One agent per (resident, agent bot) pair, so a bot that serves many residents still counts once per
+    // resident. A letter sealed from a seal link counts as one agent: only an agent running code makes the
+    // link, and nothing tells us which agent it was.
+    agents: db.prepare(`SELECT
+      (SELECT COUNT(DISTINCT owner_hash || ':' || agent_hash) FROM capsules
+        WHERE burned = 0 AND kind != 'demo' AND agent_hash IS NOT NULL) +
+      (SELECT COUNT(*) FROM capsules WHERE burned = 0 AND kind != 'demo' AND source = 'link') AS n`),
     consent: db.prepare(`INSERT INTO consents (owner_hash, agreed_at) VALUES (?, ?) ON CONFLICT (owner_hash) DO NOTHING`),
     hasConsent: db.prepare(`SELECT 1 FROM consents WHERE owner_hash = ?`),
   };

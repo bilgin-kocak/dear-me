@@ -15,7 +15,7 @@ process.on("unhandledRejection", (err) => log("error", { where: "unhandled_rejec
 const cfg = loadConfig();
 const store = openStore(cfg.dbPath);
 
-const server = serve({ fetch: createWeb(cfg, store).fetch, port: cfg.port }, (info) =>
+const server = serve({ fetch: createWeb(cfg, store, { log }).fetch, port: cfg.port }, (info) =>
   log("web_listening", { port: info.port, round: cfg.round }));
 
 const bot = cfg.botToken ? createBot(cfg, store, log) : undefined;
@@ -27,7 +27,12 @@ let stopping = false;
 // takes polling back within seconds, and any other run, like a laptop, gives it up.
 function startBot() {
   if (!bot || stopping) return;
-  polling = bot.start({ onStart: (me) => log("bot_started", { bot: me.username }) }).catch((err) => {
+  polling = bot.start({
+    onStart: (me) => {
+      cfg.botUsername = me.username; // the pages point at the bot as the fallback
+      log("bot_started", { bot: me.username });
+    },
+  }).catch((err) => {
     const conflict = err instanceof GrammyError && err.error_code === 409;
     log("error", { where: "bot_polling", error: brief(err) });
     if (stopping) return;

@@ -7,6 +7,7 @@ export const SOURCE_LABEL: Record<Source, string> = {
   agent: "Written by an agent",
   unverified: "Unverified",
   resident: "Written by the resident",
+  link: "Sealed from your agent's link",
 };
 
 /** Who wrote a message the resident sent us, judged only by Telegram's forward_origin. */

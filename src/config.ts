@@ -2,6 +2,8 @@ import { roundForUnlock, timeOfRound } from "./lock.ts";
 
 export type Config = ReturnType<typeof loadConfig>;
 
+export const MAX_CHARS = 4000; // the longest letter we seal
+
 export function loadConfig(env: Record<string, string | undefined> = process.env) {
   const port = Number(env.PORT ?? 3000);
   const botToken = env.TELEGRAM_BOT_TOKEN || undefined;
@@ -29,6 +31,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     unlockMs: timeOfRound(round),
     dbPath: env.DB_PATH ?? "data/dear-me.db",
     hashSalt: hashSalt || "dev-only-salt", // web-only runs hash nothing personal
+    botUsername: undefined as string | undefined, // set once the bot has started
   };
 }
 

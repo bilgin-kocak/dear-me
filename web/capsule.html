@@ -12,9 +12,13 @@
 <main class="narrow">
   <p class="eyebrow">Dear Me, From Your Agent</p>
   <div id="capsule"><p class="muted">Loading capsule…</p></div>
+  <div class="manage" id="manage" hidden>
+    <button class="ghost" id="delete">Delete our copy</button>
+    <p class="muted small" id="deleteHint">Deletes the copy on our server. A downloaded .age file still opens the letter.</p>
+  </div>
   <footer>
     Opened in your browser with <a href="https://github.com/drand/tlock-js" rel="noreferrer">tlock-js</a> and the public
-    <a href="https://drand.love" rel="noreferrer">drand</a> network. Our server never decrypts: it held the letter in memory only until it was sealed, and keeps only the time-locked ciphertext.
+    <a href="https://drand.love" rel="noreferrer">drand</a> network. Our server never decrypts, and keeps only the time-locked ciphertext.
     · <a href="/open">Open a .age file</a>
   </footer>
 </main>

@@ -1,12 +1,14 @@
 // Everything the bot says. HTML parse mode.
 import { dateTimeIST } from "./config.ts";
+import { sealLinkPrompt } from "./prompt.ts";
+import { SEAL_PATH } from "./sealink.ts";
 
 export const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 export const intro = (unlockMs: number) => [
   "<b>Dear Me, From Your Agent</b> ✉️",
   "Ask your Agent Village agent to write you a letter to open in a year.",
-  `Forward its reply here and I lock it with drand timelock encryption until ${dateTimeIST(unlockMs)}.`,
+  `It replies with a link, and one tap locks the letter with drand timelock encryption until ${dateTimeIST(unlockMs)}.`,
   "The key does not exist yet: the League of Entropy publishes it at that exact second.",
 ].join("\n");
 
@@ -17,28 +19,19 @@ export const consent = (unlockMs: number) => [
   "• You can delete our copy at any time with /burn.",
 ].join("\n");
 
-// Section 6, exactly as written.
-export const LETTER_PROMPT = `This is a one-off writing task. Please don't save anything from it to memory and don't record any intentions.
+export const promptMessage = (origin: string) =>
+  `<pre>${esc(sealLinkPrompt(origin))}</pre>\n\nSend this to your Agent Village agent in your private chat. It replies with a link: tap it to seal the letter on your phone. If your agent can't make the link and writes the letter instead, forward the reply here.`;
 
-Write me a private letter that I will open on 31 October 2027, one year after Edge City India ends. Write it as yourself, my agent, using only what you actually know about me from our conversations and my profile. If you are guessing, say so.
-
-Please include:
-1. What I came to Edge City India for, in my own words if I told you.
-2. What I said I would do next, as concretely as you can.
-3. One moment or conversation from these weeks worth remembering.
-4. One thing you may have gotten wrong about me.
-5. Three questions for me to answer in October 2027.
-
-Use first names only for other people, and no contact details. Plain text, no headings or markdown, under 300 words. Start with "Dear" and my name, and sign with your own name.`;
-
-export const promptMessage = () =>
-  `<pre>${esc(LETTER_PROMPT)}</pre>\n\nSend this to your Agent Village agent in your private chat. When it replies, forward the reply here.`;
+/** What a seal link sent here gets: it is meant to be tapped, not forwarded. */
+export const sealLinkHint = () =>
+  `That's a seal link. Tap it to seal the letter on your phone: the letter never needs to pass through me. (Links look like …${SEAL_PATH}#…)`;
 
 export const privacy = (unlockMs: number) => [
   "<b>Privacy</b>",
   consent(unlockMs),
   "",
   "• I hold your letter in memory only until you tap Seal. It is never written to our database, files or logs. Only the time-locked ciphertext is stored.",
+  "• A letter sealed from your agent's seal link is sealed on your own device: our server only ever receives the ciphertext. Delete our copy of such a capsule from its page.",
   "• After sealing I delete the forwarded messages and the preview from this chat. The original is still in your agent's chat. Anything you typed yourself stays here for you to delete.",
   "• I store a salted hash of your Telegram id (for consent, /mine and limits) and, for agent-written letters, a salted hash of the agent's bot username (only to count unique agents).",
   "• I never connect to, change or read your Agent Village agent. Letters are written by residents' own agents and forwarded by the residents.",
@@ -48,8 +41,8 @@ export const help = () => [
   "<b>How it works</b>",
   "1. /start and tap I agree.",
   "2. Send the prompt to your Agent Village agent.",
-  "3. Forward its reply here (several parts are fine, I wait 90 seconds).",
-  "4. Check the preview and tap Seal.",
+  "3. Tap the link it replies with: the letter is sealed on your phone.",
+  "4. No link? Forward its reply here instead (several parts are fine, I wait 90 seconds), check the preview and tap Seal.",
   "",
   "/mine: your capsules and links",
   "/burn &lt;id&gt;: delete our copy (your .age file still works)",

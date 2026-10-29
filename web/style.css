@@ -173,6 +173,28 @@ textarea {
 @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 .status { color: var(--gold-hi); font-family: var(--mono); font-size: 14px; }
 
+/* Ask, seal and capsule pages */
+.steps, .consent { text-align: left; max-width: 560px; margin: 20px auto; padding-left: 1.4em; }
+.steps li, .consent li { margin: 8px 0; }
+.consent { color: var(--muted); }
+.consent strong { color: var(--text); }
+.prompt {
+  margin: 0 auto;
+  max-width: 680px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--night-2);
+  font: 14px/1.5 var(--mono);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.linkbox { display: flex; gap: 8px; align-items: center; max-width: 560px; margin: 20px auto 8px; padding: 8px 8px 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--night-2); }
+.linkbox a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 14px var(--mono); text-align: left; }
+.linkbox button { padding: 10px 14px; font-size: 14px; }
+.manage { margin-top: 8px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }

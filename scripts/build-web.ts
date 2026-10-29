@@ -3,7 +3,7 @@
 import { build } from "esbuild";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-const PAGES = ["wall", "capsule", "open", "demo"];
+const PAGES = ["wall", "capsule", "open", "demo", "seal", "ask"];
 const css = readFileSync("web/style.css", "utf8");
 mkdirSync("dist/web", { recursive: true });
 

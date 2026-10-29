@@ -1,6 +1,6 @@
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
-import { dateIST, dateTimeIST, type Config } from "./config.ts";
+import { dateIST, dateTimeIST, MAX_CHARS, type Config } from "./config.ts";
 import type { Capsule, Kind, Store } from "./db.ts";
 import { saltedHash } from "./hash.ts";
 import { calendarFile } from "./ics.ts";
@@ -9,9 +9,9 @@ import type { Log } from "./log.ts";
 import { backgroundTimer, createMergeWindow, MERGE_WINDOW_MS, mergeText } from "./merge.ts";
 import { classifyOrigin, combineOrigins, SOURCE_LABEL, type Origin } from "./origin.ts";
 import { sealCapsule } from "./seal.ts";
+import { SEAL_PATH } from "./sealink.ts";
 import * as T from "./texts.ts";
 
-export const MAX_CHARS = 4000;
 export const MAX_PER_DAY = 3;
 const PREVIEW_CHARS = 80;
 const PREVIEW_TTL_MS = 30 * 60_000; // an unanswered preview is forgotten after 30 minutes
@@ -184,7 +184,7 @@ export function createBot(
     log("consent");
     await ctx.answerCallbackQuery("Thank you").catch(() => {});
     await ctx.editMessageReplyMarkup().catch(() => {});
-    await ctx.reply(T.promptMessage(), html);
+    await ctx.reply(T.promptMessage(cfg.publicBaseUrl), html);
   });
 
   pm.command("help", (ctx) => ctx.reply(T.help(), html));
@@ -234,6 +234,9 @@ export function createBot(
     const text = msg.text ?? msg.caption ?? "";
     const forwarded = Boolean(msg.forward_origin);
     if (!forwarded && text.startsWith("/")) return ctx.reply(T.help(), html);
+    // A seal link holds the letter encoded: sealing it here would lock away gibberish.
+    const urls = (msg.entities ?? msg.caption_entities ?? []).map((e) => (e.type === "text_link" ? e.url : ""));
+    if ([text, ...urls].some((s) => s.includes(`${SEAL_PATH}#`))) return ctx.reply(T.sealLinkHint());
     if (sealingClosed()) return ctx.reply(closedMessage());
     if (!store.hasConsent(ownerOf(ctx))) {
       return ctx.reply(`Before I seal anything, please read this and tap I agree. Then forward the letter again.\n\n${T.consent(cfg.unlockMs)}`, { ...html, reply_markup: agreeButton });

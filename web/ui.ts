@@ -54,9 +54,9 @@ export async function typewriter(el: HTMLElement, text: string, totalMs = 6000) 
   }
 }
 
-export function download(name: string, text: string) {
+export function download(name: string, text: string, type = "application/octet-stream") {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type: "application/octet-stream" }));
+  a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -84,4 +84,20 @@ export function showErrors(box: HTMLElement, lines: string[]) {
   void box.offsetWidth; // restart the animation
   box.classList.add("shake");
   bringIntoView(box);
+}
+
+/** Copies text, falling back to a hidden textarea where in-app browsers lack the clipboard API. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = Object.assign(document.createElement("textarea"), { value: text, readOnly: true });
+    area.style.cssText = "position:fixed;top:0;opacity:0";
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  }
 }
