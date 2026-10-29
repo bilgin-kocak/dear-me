@@ -57,6 +57,11 @@ function recall(key: string | null): Sealed | null {
     return null;
   }
 }
+/** False only when our server says the capsule is gone: its owner deleted our copy, so it can be sealed again. */
+async function stillThere(id: string) {
+  const res = await fetch(`/api/c/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => undefined);
+  return !(res && (res.status === 404 || res.status === 410));
+}
 function remember(key: string | null, sealed: Sealed) {
   try {
     if (key) localStorage.setItem(key, JSON.stringify(sealed));
@@ -142,7 +147,7 @@ async function start(letter: string) {
   setDates(unlockMs);
   const key = await memoryKey(letter);
   const before = recall(key);
-  if (before) return done(before, unlockMs, undefined, true);
+  if (before && (await stillThere(before.id))) return done(before, unlockMs, undefined, true);
   if (Date.now() >= unlockMs) {
     return problem("Sealing has closed", `Letters opened on ${fmtIST(unlockMs)}. A letter sealed now would open at once.`);
   }
