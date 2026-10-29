@@ -161,8 +161,12 @@ async function start(letter: string) {
 addEventListener("hashchange", () => location.reload());
 
 const fragment = location.hash.slice(1);
-const letter = fragment ? await readSealLink(fragment) : null;
-if (!fragment) {
+// Seal links are zlib-compressed: Safari before 16.4 can't unpack them.
+const oldBrowser = typeof DecompressionStream !== "function";
+const letter = fragment && !oldBrowser ? await readSealLink(fragment) : null;
+if (oldBrowser) {
+  problem("This browser is too old for seal links", "Open the link in an up-to-date browser, like Safari 16.4 or later, or Chrome.");
+} else if (!fragment) {
   problem("No letter in this link", "This page seals a letter from a seal link, which your agent makes. The letter travels after the # in the link, and this link has nothing there.");
 } else if (!letter) {
   problem("This link is damaged", "Part of the letter got lost or changed on the way, so it can't be read. Ask your agent to send the link again, exactly as its code printed it.");
